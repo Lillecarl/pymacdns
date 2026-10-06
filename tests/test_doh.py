@@ -124,7 +124,9 @@ async def test_doh_client_pooled():
     async with anyio.create_task_group() as tg:
         tg.start_soon(listener.serve, counting)
         await anyio.sleep(0.2)
-        async with httpx.AsyncClient(verify=client_ctx) as client:
+        # http2=True like production: the H1-only fake negotiates down,
+        # which is exactly the fallback this also proves.
+        async with httpx.AsyncClient(verify=client_ctx, http2=True) as client:
             for _ in range(2):
                 reply = await resolver_mod.lookup(wire, upstream, doh_client=client)
                 assert dns.message.from_wire(reply).rcode() == dns.rcode.NOERROR

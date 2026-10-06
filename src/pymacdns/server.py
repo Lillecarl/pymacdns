@@ -194,10 +194,12 @@ async def run(
             raise RuntimeError(f"pymacdns: could not bind any of {wanted}")
         self_hosts = set(bound)
         # One shared DoH client for the daemon's lifetime: connection
-        # pooling (HTTP/1.1 keep-alive) instead of a handshake per query.
-        # Plain HTTP/1.1 and not H2 on purpose: the whole loopback suite
-        # exercises this path, and H2 buys only multiplexing on top.
-        state.doh_client = await stack.enter_async_context(httpx.AsyncClient())
+        # pooling instead of a handshake per query. http2=True because
+        # Quad9 answers HTTP/1.1 DoH with 505 and requires HTTP/2 per
+        # RFC 8484 section 5.2; servers without ALPN fall back to 1.1.
+        state.doh_client = await stack.enter_async_context(
+            httpx.AsyncClient(http2=True)
+        )
         async with anyio.create_task_group() as tg:
             for sock in udp_socks:
                 tg.start_soon(serve_udp_sock, sock, state)

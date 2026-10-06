@@ -10,7 +10,7 @@ buildPythonPackage {
   pythonImportsCheck = [ "pymacdns" ];
   meta = {
     description = "macOS DNS forwarder respecting DHCP upstreams";
-    license = lib.licenses.mit;
+    license = lib.licenses.asl20;
     mainProgram = "pymacdns";
   };
 }

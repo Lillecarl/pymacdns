@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import anyio
 import dns.message
 import dns.rcode
+import httpx
 
 from pymacdns import cache as cache_mod
 from pymacdns import control as control_mod
@@ -25,6 +26,7 @@ class DnsState:
     routes: routes_mod.RouteTable = field(default_factory=routes_mod.RouteTable)
     route_filter: routes_mod.RouteFilter = routes_mod.RouteFilter.OFF
     cache: cache_mod.DnsCache = field(default_factory=cache_mod.DnsCache)
+    doh_client: httpx.AsyncClient | None = None
 
     def pick(self, qname: str) -> resolver_mod.Upstream | None:
         return resolver_mod.pick_upstream(qname, self.domains, self.standard)
@@ -66,7 +68,9 @@ async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
     try:
         if upstream is None:
             raise ValueError("no upstream")
-        reply = await resolver_mod.lookup(wire, upstream, use_tcp=use_tcp)
+        reply = await resolver_mod.lookup(
+            wire, upstream, use_tcp=use_tcp, doh_client=state.doh_client
+        )
         if dns.message.from_wire(reply).rcode() not in (
             dns.rcode.NOERROR,
             dns.rcode.NXDOMAIN,
@@ -181,6 +185,11 @@ async def run(
             )
             raise RuntimeError(f"pymacdns: could not bind any of {wanted}")
         self_hosts = set(bound)
+        # One shared DoH client for the daemon's lifetime: connection
+        # pooling (HTTP/1.1 keep-alive) instead of a handshake per query.
+        # Plain HTTP/1.1 and not H2 on purpose: the whole loopback suite
+        # exercises this path, and H2 buys only multiplexing on top.
+        state.doh_client = await stack.enter_async_context(httpx.AsyncClient())
         async with anyio.create_task_group() as tg:
             for sock in udp_socks:
                 tg.start_soon(serve_udp_sock, sock, state)

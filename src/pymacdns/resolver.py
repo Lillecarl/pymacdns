@@ -12,6 +12,7 @@ import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
+import httpx
 
 DEFAULT_TIMEOUT: Final = 2.0
 
@@ -220,25 +221,24 @@ async def forward_doh(
     port: int,
     path: str,
     timeout: float,
+    client: httpx.AsyncClient | None = None,
     ssl_context: ssl.SSLContext | None = None,
 ) -> bytes:
     """DNS-over-HTTPS via dnspython: POST of the wire query, verified.
 
     An IP host verifies against its SANs with no bootstrap lookup;
-    a name resolves through the system (so /etc/hosts works). A custom
-    context slots into dnspython's verify; otherwise its default (the
-    certifi bundle) applies.
+    a name resolves through the system (so /etc/hosts works). A shared
+    client pools connections and carries its own verification; without
+    one dnspython dials per query, verified by the given context or by
+    default when it is None.
     """
     query = dns.message.from_wire(wire)
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     url = f"https://{host}:{port}{path or '/dns-query'}"
+    verify = True if ssl_context is None else ssl_context
     response = await dns.asyncquery.https(
-        query,
-        url,
-        timeout=timeout,
-        post=True,
-        verify=ssl_context if ssl_context is not None else True,
+        query, url, timeout=timeout, post=True, client=client, verify=verify
     )
     return response.to_wire()
 
@@ -248,6 +248,7 @@ async def lookup(
     upstream: Upstream,
     use_tcp: bool = False,
     ssl_context: ssl.SSLContext | None = None,
+    doh_client: httpx.AsyncClient | None = None,
 ) -> bytes:
     """Forward to upstreams in listed order, return the first success.
 
@@ -269,7 +270,13 @@ async def lookup(
                 )
             if scheme == "https":
                 return await forward_doh(
-                    wire, host, port, path, upstream.timeout, ssl_context
+                    wire,
+                    host,
+                    port,
+                    path,
+                    upstream.timeout,
+                    doh_client,
+                    ssl_context,
                 )
             if use_tcp:
                 return await forward_tcp(wire, host, port, upstream.timeout)

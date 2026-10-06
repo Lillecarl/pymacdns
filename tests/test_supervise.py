@@ -113,6 +113,9 @@ async def test_kill_child_cleans_up(tmp_path):
     proc, control_sock = await spawn(marker, "kc", 15522)
     try:
         with anyio.fail_after(60):
+            # The marker lands before the control socket exists; imports
+            # (notably httpx) decide how far apart those two moments are.
+            await wait_for(Path(control_sock))
             reply = await control_request(control_sock, {"op": "pid"})
             os.kill(reply["pid"], signal.SIGKILL)
             await proc.wait()

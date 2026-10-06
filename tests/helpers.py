@@ -61,40 +61,51 @@ async def answer_plain_udp(sock: anyio.abc.UDPSocket) -> None:
 
 
 async def answer_doh(stream: anyio.abc.SocketStream) -> None:
-    """Minimal DoH responder: one POST, NOERROR with an empty answer."""
+    """Minimal DoH responder: POSTs answered until EOF, keep-alive.
+
+    No Connection: close, so an httpx pool reuses the connection and
+    a test can prove it by counting accepted streams.
+    """
     try:
         async with stream:
-            raw = b""
-            while b"\r\n\r\n" not in raw:
+            while True:
+                raw = b""
+                while b"\r\n\r\n" not in raw:
+                    try:
+                        chunk = await stream.receive(65536)
+                    except anyio.EndOfStream:
+                        return
+                    if not chunk:
+                        return
+                    raw += chunk
+                head, _, rest = raw.partition(b"\r\n\r\n")
+                lines = head.decode("latin-1").split("\r\n")
                 try:
-                    chunk = await stream.receive(65536)
-                except anyio.EndOfStream:
+                    method, _target, _version = lines[0].split(" ", 2)
+                except ValueError:
                     return
-                if not chunk:
+                if method != "POST":
                     return
-                raw += chunk
-            head, _, rest = raw.partition(b"\r\n\r\n")
-            lines = head.decode("latin-1").split("\r\n")
-            length = 0
-            for line in lines[1:]:
-                if line.lower().startswith("content-length:"):
-                    length = int(line.split(":", 1)[1].strip())
-            body = rest
-            while len(body) < length:
-                try:
-                    body += await stream.receive(length - len(body))
-                except anyio.EndOfStream:
-                    return
-            request = dns.message.from_wire(body)
-            response = dns.message.make_response(request)
-            response.set_rcode(dns.rcode.NOERROR)
-            reply = response.to_wire()
-            await stream.send(
-                f"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\n"
-                f"Content-Length: {len(reply)}\r\nConnection: close\r\n\r\n".encode()
-                + reply
-            )
-    except anyio.BrokenResourceError:
-        # httpx closes the TCP connection without a TLS close_notify;
-        # the answer already went out, so there is nothing to report.
+                length = 0
+                for line in lines[1:]:
+                    if line.lower().startswith("content-length:"):
+                        length = int(line.split(":", 1)[1].strip())
+                body = rest
+                while len(body) < length:
+                    try:
+                        body += await stream.receive(length - len(body))
+                    except anyio.EndOfStream:
+                        return
+                request = dns.message.from_wire(body)
+                response = dns.message.make_response(request)
+                response.set_rcode(dns.rcode.NOERROR)
+                reply = response.to_wire()
+                await stream.send(
+                    f"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\n"
+                    f"Content-Length: {len(reply)}\r\n\r\n".encode() + reply
+                )
+    except (anyio.BrokenResourceError, ssl.SSLError):
+        # Teardown noise from clients that drop the connection instead
+        # of closing TLS cleanly (httpx does this on pool close). The
+        # answers already went out; the client-side assertions decide.
         pass

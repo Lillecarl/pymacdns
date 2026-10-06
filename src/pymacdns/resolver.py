@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 from typing import Final
 
@@ -77,14 +78,24 @@ async def forward_tcp(wire: bytes, host: str, port: int, timeout: float) -> byte
 
 
 def _split_hostport(nameserver: str) -> tuple[str, int]:
+    """Split 'host', 'host:port', or '[v6]:port'.
+
+    Bare IPs (v4 or v6, including scoped v6 like fe80::1%en0) are
+    detected with ipaddress and returned with the default port.
+    """
     ns = nameserver.strip()
     if ns.startswith("["):
         host, _, rest = ns[1:].partition("]")
-        rest = rest.lstrip(":")
-        return host, int(rest) if rest.isdigit() else 53
-    if ns.count(":") == 1:
-        host, _, port = ns.partition(":")
+        port = rest.lstrip(":")
         return host, int(port) if port.isdigit() else 53
+    try:
+        ipaddress.ip_address(ns)
+        return ns, 53
+    except ValueError:
+        pass
+    host, sep, port = ns.rpartition(":")
+    if sep and port.isdigit():
+        return host, int(port)
     return ns, 53
 
 

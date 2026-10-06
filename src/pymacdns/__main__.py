@@ -7,6 +7,7 @@ import anyio
 
 from pymacdns import server as server_mod
 from pymacdns.config import DEFAULT_CONFIG_PATH, load_config
+from pymacdns.store import dump_toml
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,6 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not keep /etc/resolv.conf pointed at us",
     )
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("dump", help="print live macOS resolvers as TOML")
     return parser
 
 
@@ -42,6 +45,9 @@ async def async_main(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.command == "dump":
+        sys.stdout.write(dump_toml())
+        return
     try:
         anyio.run(async_main, args)
     except KeyboardInterrupt:

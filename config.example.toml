@@ -1,0 +1,30 @@
+# Example pymacdns configuration.
+#
+# Copy to /etc/pymacdns/config.toml (or pass --config <path>) and edit.
+# See `pymacdns dump` for TOML rendered from your live macOS resolvers.
+#
+# Routing: longest domain match wins; ties go to the lowest priority,
+# then TOML over /etc/resolver over system state. The system default
+# has priority 0, so negative priorities outrank it.
+#
+# Note on A vs AAAA: pymacdns forwards whatever query types it receives.
+# Whether macOS issues AAAA queries is the system's call, not the
+# forwarder's. Dual-stack answers are normal and harmless: clients race
+# both (Happy Eyeballs) and fall back within a fraction of a second.
+
+[global]
+listen = "127.0.0.1:53"
+timeout = 2.0
+interval = 1.0
+
+# Force all DNS through a filtering resolver first. Remove the comment
+# to enable. Longest domain match still wins for configured domains.
+# [[resolver]]
+# nameservers = ["9.9.9.9"]
+# priority = -100
+
+# Pin a domain to specific servers, beating /etc/resolver entries and
+# VPN-pushed resolvers for the same domain.
+# [[resolver]]
+# domain = "dynami.st"
+# nameservers = ["10.0.250.1"]

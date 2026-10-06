@@ -19,6 +19,7 @@ in
         ps.dnspython
         ps.pydantic
         ps.pydantic-settings
+        ps.pytest
         pyobjc-framework-SystemConfiguration
       ]))
       pkgs.ruff

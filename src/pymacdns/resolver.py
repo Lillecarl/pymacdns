@@ -6,8 +6,26 @@ from typing import Final
 
 import anyio
 import dns.message
+import dns.rcode
+import dns.rdataclass
+import dns.rdatatype
+import dns.rrset
 
 DEFAULT_TIMEOUT: Final = 2.0
+
+# Namespaces owned by multicast DNS (RFC 6762) or otherwise reserved.
+# A unicast forwarder must never claim them: REFUSED keeps native
+# clients on their mDNS path and fails direct clients fast without
+# caching a false negative.
+REFUSED_SUFFIXES: Final = (
+    "local.",
+    "254.169.in-addr.arpa.",
+    "8.e.f.ip6.arpa.",
+    "9.e.f.ip6.arpa.",
+    "a.e.f.ip6.arpa.",
+    "b.e.f.ip6.arpa.",
+)
+LOCALHOST_TTL: Final = 120
 
 
 @dataclass
@@ -51,6 +69,45 @@ def servfail(wire: bytes) -> bytes:
     response = dns.message.make_response(request)
     response.set_rcode(dns.rcode.SERVFAIL)
     return response.to_wire()
+
+
+def special_response(wire: bytes) -> bytes | None:
+    """Answer reserved names locally, else None meaning forward upstream.
+
+    .local and mDNS reverse zones get REFUSED, .invalid gets NXDOMAIN
+    per RFC 2606, and .localhost resolves to loopback per RFC 6761.
+    """
+    request = dns.message.from_wire(wire)
+    if not request.question:
+        raise ValueError("DNS message has no question")
+    question = request.question[0]
+    qname = str(question.name).lower()
+    qtype = question.rdtype
+
+    if qname == "localhost." or qname.endswith(".localhost."):
+        response = dns.message.make_response(request)
+        if qtype in (dns.rdatatype.A, dns.rdatatype.ANY):
+            response.answer.append(
+                dns.rrset.from_text(
+                    question.name, LOCALHOST_TTL, "IN", "A", "127.0.0.1"
+                )
+            )
+        if qtype in (dns.rdatatype.AAAA, dns.rdatatype.ANY):
+            response.answer.append(
+                dns.rrset.from_text(question.name, LOCALHOST_TTL, "IN", "AAAA", "::1")
+            )
+        return response.to_wire()
+    if qname == "invalid." or qname.endswith(".invalid."):
+        response = dns.message.make_response(request)
+        response.set_rcode(dns.rcode.NXDOMAIN)
+        return response.to_wire()
+    if qname in REFUSED_SUFFIXES or any(
+        qname.endswith("." + suffix) for suffix in REFUSED_SUFFIXES
+    ):
+        response = dns.message.make_response(request)
+        response.set_rcode(dns.rcode.REFUSED)
+        return response.to_wire()
+    return None
 
 
 async def forward_udp(wire: bytes, host: str, port: int, timeout: float) -> bytes:

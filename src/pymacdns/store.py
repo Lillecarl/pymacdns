@@ -25,12 +25,19 @@ RUNLOOP_TICK: Final = 1.0
 TOML_RANK: Final = 0
 FILE_RANK: Final = 1
 STORE_RANK: Final = 2
-# Priorities observed in scutil --dns: default has none (0),
-# supplemental VPN resolvers carry explicit orders (100000+),
-# mDNS sits at 300000+. /etc/resolver entries show no order and
+# Priorities observed in scutil --dns: the default resolver shows none
+# (implicit first), supplemental VPN resolvers carry explicit orders
+# such as 100600/103000, mDNS sits at 300000+. VPN clients that set no
+# order (e.g. ZeroTier's MacDNSHelper) land here.
+SUPPLEMENTAL_DEFAULT_PRIORITY: Final = 100000
+# /etc/resolver/<domain> entries show no order in scutil --dns and
 # behave as domain-scoped entries, so they join the 100000 class.
 FILE_PRIORITY: Final = 100000
-SUPPLEMENTAL_DEFAULT_PRIORITY: Final = 100000
+# The system default sorts after VPN supplemental entries: Apple
+# documents that an empty SupplementalMatchDomains entry directs all
+# queries to the VPN DNS *first*, and observed primary-service orders
+# sit around 200000.
+GLOBAL_DEFAULT_PRIORITY: Final = 200000
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,21 @@ class Candidate:
     nameservers: tuple[str, ...]
     priority: int
     source_rank: int
+
+
+@dataclass(frozen=True)
+class ServiceDns:
+    """One State:/Network/Service/*/DNS dictionary in plain types.
+
+    Shapes follow Apple's DNS dictionary (ServerAddresses,
+    SupplementalMatchDomains, SupplementalMatchOrders) as written by
+    real VPN clients such as ZeroTier's MacDNSHelper and NetBird's
+    host_darwin configurator.
+    """
+
+    servers: tuple[str, ...] = ()
+    match_domains: tuple[str, ...] = ()
+    match_orders: tuple[str, ...] = ()
 
 
 @dataclass
@@ -54,70 +76,67 @@ def _str_list(value: object) -> list[str]:
 
 
 def merge_to_snapshot(candidates: list[Candidate], timeout: float) -> Snapshot:
-    """Pick one winner per domain: lowest priority, then lowest source rank."""
-    best: dict[str, Candidate] = {}
+    """Merge one winner list per domain.
+
+    Same-domain candidates concatenate nameservers in priority order
+    (then source rank), so a VPN supplemental entry with an empty
+    domain means "ask VPN DNS first, fall back to the default" exactly
+    as Apple documents. lookup() already tries them in order.
+    """
+    grouped: dict[str, list[Candidate]] = {}
     for candidate in candidates:
-        prev = best.get(candidate.domain)
-        if prev is None or (candidate.priority, candidate.source_rank) < (
-            prev.priority,
-            prev.source_rank,
-        ):
-            best[candidate.domain] = candidate
-    standard = best.pop("", None)
+        grouped.setdefault(candidate.domain, []).append(candidate)
+
+    def servers(group: list[Candidate]) -> list[str]:
+        ordered = sorted(group, key=lambda c: (c.priority, c.source_rank))
+        seen: list[str] = []
+        for candidate in ordered:
+            for nameserver in candidate.nameservers:
+                if nameserver not in seen:
+                    seen.append(nameserver)
+        return seen
+
+    standard_addrs = servers(grouped.pop("", []))
     return Snapshot(
-        standard=resolver_mod.Upstream(
-            nameservers=list(standard.nameservers), timeout=timeout
-        )
-        if standard is not None
+        standard=resolver_mod.Upstream(nameservers=standard_addrs, timeout=timeout)
+        if standard_addrs
         else None,
         domains={
-            domain: resolver_mod.Upstream(
-                nameservers=list(winner.nameservers), timeout=timeout
-            )
-            for domain, winner in best.items()
+            domain: resolver_mod.Upstream(nameservers=servers(group), timeout=timeout)
+            for domain, group in grouped.items()
+            if servers(group)
         },
     )
 
 
-def _read_system(self_hosts: set[str]) -> list[Candidate]:
-    """Default + supplemental resolvers from the dynamic store."""
-    from SystemConfiguration import (
-        SCDynamicStoreCopyKeyList,
-        SCDynamicStoreCopyValue,
-        SCDynamicStoreCreate,
-    )
-
-    store = SCDynamicStoreCreate(None, "pymacdns", None, None)
-    found: list[Candidate] = []
-
-    global_info = dict(SCDynamicStoreCopyValue(store, GLOBAL_DNS_KEY) or {})
-    addrs = tuple(
-        addr
-        for addr in _str_list(global_info.get("ServerAddresses"))
-        if addr not in self_hosts
-    )
-    if addrs:
-        found.append(
-            Candidate(domain="", nameservers=addrs, priority=0, source_rank=STORE_RANK)
+def system_candidates(
+    global_addrs: list[str],
+    services: list[ServiceDns],
+    self_hosts: set[str],
+) -> list[Candidate]:
+    """Build candidates from plain store data. Pure function for tests."""
+    found = [
+        Candidate(
+            domain="",
+            nameservers=tuple(
+                addr for addr in global_addrs if addr not in self_hosts
+            ),
+            priority=GLOBAL_DEFAULT_PRIORITY,
+            source_rank=STORE_RANK,
         )
-
-    for key in SCDynamicStoreCopyKeyList(store, SERVICE_DNS_PATTERN) or []:
-        info = dict(SCDynamicStoreCopyValue(store, str(key)) or {})
-        addrs = tuple(
-            addr
-            for addr in _str_list(info.get("ServerAddresses"))
-            if addr not in self_hosts
-        )
+    ]
+    for service in services:
+        addrs = tuple(addr for addr in service.servers if addr not in self_hosts)
         if not addrs:
             continue
-        orders = _str_list(info.get("SupplementalMatchOrders"))
-        for index, domain in enumerate(_str_list(info.get("SupplementalMatchDomains"))):
-            if index < len(orders):
-                try:
-                    priority = int(orders[index])
-                except ValueError:
-                    priority = SUPPLEMENTAL_DEFAULT_PRIORITY
-            else:
+        for index, domain in enumerate(service.match_domains):
+            try:
+                priority = (
+                    int(service.match_orders[index])
+                    if index < len(service.match_orders)
+                    else SUPPLEMENTAL_DEFAULT_PRIORITY
+                )
+            except ValueError:
                 priority = SUPPLEMENTAL_DEFAULT_PRIORITY
             found.append(
                 Candidate(
@@ -127,21 +146,16 @@ def _read_system(self_hosts: set[str]) -> list[Candidate]:
                     source_rank=STORE_RANK,
                 )
             )
-    return found
+    return [c for c in found if c.nameservers or c.domain]
 
 
-def _read_files(self_hosts: set[str]) -> list[Candidate]:
-    """Domain-scoped resolvers from /etc/resolver/<domain> files."""
-    found: list[Candidate] = []
-    resolver_dir = Path(RESOLVER_DIR)
-    if not resolver_dir.is_dir():
-        return found
-    for entry in sorted(resolver_dir.iterdir()):
-        if entry.name.startswith(".") or not entry.is_file():
-            continue
-        try:
-            text = entry.read_text()
-        except OSError:
+def file_candidates(
+    files: dict[str, str], self_hosts: set[str]
+) -> list[Candidate]:
+    """Build candidates from /etc/resolver/<domain> file contents. Pure."""
+    found = []
+    for domain, text in sorted(files.items()):
+        if domain.startswith("."):
             continue
         addrs = tuple(
             parts[1]
@@ -153,13 +167,59 @@ def _read_files(self_hosts: set[str]) -> list[Candidate]:
         if addrs:
             found.append(
                 Candidate(
-                    domain=normalize_domain(entry.name),
+                    domain=normalize_domain(domain),
                     nameservers=addrs,
                     priority=FILE_PRIORITY,
                     source_rank=FILE_RANK,
                 )
             )
     return found
+
+
+def _fetch_store_dicts() -> tuple[list[str], list[ServiceDns]]:
+    """Read Global + per-service DNS dicts, converted to plain types."""
+    from SystemConfiguration import (
+        SCDynamicStoreCopyKeyList,
+        SCDynamicStoreCopyValue,
+        SCDynamicStoreCreate,
+    )
+
+    store = SCDynamicStoreCreate(None, "pymacdns", None, None)
+    global_info = dict(SCDynamicStoreCopyValue(store, GLOBAL_DNS_KEY) or {})
+    services = []
+    for key in SCDynamicStoreCopyKeyList(store, SERVICE_DNS_PATTERN) or []:
+        info = dict(SCDynamicStoreCopyValue(store, str(key)) or {})
+        services.append(
+            ServiceDns(
+                servers=tuple(_str_list(info.get("ServerAddresses"))),
+                match_domains=tuple(_str_list(info.get("SupplementalMatchDomains"))),
+                match_orders=tuple(_str_list(info.get("SupplementalMatchOrders"))),
+            )
+        )
+    return _str_list(global_info.get("ServerAddresses")), services
+
+
+def _read_system(self_hosts: set[str]) -> list[Candidate]:
+    """Default + supplemental resolvers from the dynamic store."""
+    global_addrs, services = _fetch_store_dicts()
+    return system_candidates(global_addrs, services, self_hosts)
+
+
+def _read_files(
+    self_hosts: set[str], resolver_dir: str = RESOLVER_DIR
+) -> list[Candidate]:
+    """Domain-scoped resolvers from /etc/resolver/<domain> files."""
+    directory = Path(resolver_dir)
+    files = {}
+    if directory.is_dir():
+        for entry in sorted(directory.iterdir()):
+            if entry.name.startswith(".") or not entry.is_file():
+                continue
+            try:
+                files[entry.name] = entry.read_text()
+            except OSError:
+                continue
+    return file_candidates(files, self_hosts)
 
 
 def _run_watcher(

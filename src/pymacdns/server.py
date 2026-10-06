@@ -10,6 +10,7 @@ from typing import Final
 import anyio
 
 from pymacdns import resolver as resolver_mod
+from pymacdns import routes as routes_mod
 from pymacdns import store as store_mod
 from pymacdns.config import DEFAULT_CONFIG_PATH, DaemonSettings
 
@@ -20,6 +21,8 @@ RESOLV_CONF: Final = "/etc/resolv.conf"
 class DnsState:
     standard: resolver_mod.Upstream | None = None
     domains: dict[str, resolver_mod.Upstream] = field(default_factory=dict)
+    routes: routes_mod.RouteTable = field(default_factory=routes_mod.RouteTable)
+    route_filter: routes_mod.RouteFilter = routes_mod.RouteFilter.OFF
 
     def pick(self, qname: str) -> resolver_mod.Upstream | None:
         return resolver_mod.pick_upstream(qname, self.domains, self.standard)
@@ -31,6 +34,12 @@ class DnsState:
 
 async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
     try:
+        special = resolver_mod.special_response(wire)
+    except Exception:
+        raise ValueError("unparseable DNS query")
+    if special is not None:
+        return special
+    try:
         qname = resolver_mod.question_name(wire)
     except Exception:
         raise ValueError("unparseable DNS query")
@@ -38,9 +47,10 @@ async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
     if upstream is None:
         return resolver_mod.servfail(wire)
     try:
-        return await resolver_mod.lookup(wire, upstream, use_tcp=use_tcp)
+        reply = await resolver_mod.lookup(wire, upstream, use_tcp=use_tcp)
     except Exception:
         return resolver_mod.servfail(wire)
+    return routes_mod.filter_response(reply, state.routes, state.route_filter)
 
 
 async def serve_udp_sock(
@@ -93,8 +103,16 @@ async def serve_tcp_listener(
 async def refresh_loop(
     state: DnsState, self_hosts: set[str], timeout: float, config_path: str
 ) -> None:
+    prev: store_mod.Snapshot | None = None
     async for snap in store_mod.watch(timeout, self_hosts, config_path):
         state.replace(snap)
+        if state.route_filter == routes_mod.RouteFilter.OFF:
+            continue
+        if state.routes.stale() or snap != prev:
+            state.routes = await anyio.to_thread.run_sync(
+                routes_mod.read_system_routes
+            )
+        prev = snap
 
 
 async def hijack_loop(path: str, hosts: list[str], interval: float) -> None:
@@ -118,7 +136,7 @@ async def run(
     config_path: str = DEFAULT_CONFIG_PATH,
     manage_resolv_conf: bool = True,
 ) -> None:
-    state = DnsState()
+    state = DnsState(route_filter=settings.server.route_filter)
     udp_socks: list[anyio.abc.UDPSocket] = []
     tcp_listeners: list[anyio.abc.MultiListener[anyio.abc.SocketStream]] = []
     bound: list[str] = []

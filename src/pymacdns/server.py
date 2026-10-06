@@ -6,7 +6,7 @@ from typing import Final
 import anyio
 
 from pymacdns import resolver as resolver_mod
-from pymacdns import scutil as scutil_mod
+from pymacdns import store as store_mod
 
 DEFAULT_HOST: Final = "127.0.0.1"
 DEFAULT_PORT: Final = 53
@@ -18,30 +18,13 @@ RESOLV_CONF: Final = "/etc/resolv.conf"
 class DnsState:
     standard: resolver_mod.Upstream | None = None
     domains: dict[str, resolver_mod.Upstream] = field(default_factory=dict)
-    timeout: float = resolver_mod.DEFAULT_TIMEOUT
 
     def pick(self, qname: str) -> resolver_mod.Upstream | None:
         return resolver_mod.pick_upstream(qname, self.domains, self.standard)
 
-    def replace(
-        self,
-        standard: scutil_mod.ResolverInfo | None,
-        domains: dict[str, scutil_mod.ResolverInfo],
-    ) -> None:
-        if standard is None:
-            self.standard = None
-        else:
-            self.standard = resolver_mod.Upstream(
-                nameservers=list(standard.nameservers),
-                timeout=self.timeout,
-            )
-        self.domains = {
-            domain: resolver_mod.Upstream(
-                nameservers=list(info.nameservers),
-                timeout=self.timeout,
-            )
-            for domain, info in domains.items()
-        }
+    def replace(self, snap: store_mod.Snapshot) -> None:
+        self.standard = snap.standard
+        self.domains = dict(snap.domains)
 
 
 async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
@@ -103,15 +86,9 @@ async def serve_tcp(host: str, port: int, state: DnsState) -> None:
     await listener.serve(lambda stream: _tcp_connection(stream, state))
 
 
-async def refresh_loop(state: DnsState, self_hosts: set[str], interval: float) -> None:
-    while True:
-        try:
-            info = await scutil_mod.fetch_scutil_dns()
-            standard, domains = scutil_mod.select_upstreams(info, self_hosts)
-            state.replace(standard, domains)
-        except Exception:  # noqa: BLE001 - keep loop alive, next tick retries
-            pass
-        await anyio.sleep(interval)
+async def refresh_loop(state: DnsState, self_hosts: set[str], timeout: float) -> None:
+    async for snap in store_mod.watch(timeout, self_hosts):
+        state.replace(snap)
 
 
 async def hijack_loop(path: str, host: str, interval: float) -> None:
@@ -137,11 +114,11 @@ async def run(
     interval: float = DEFAULT_INTERVAL,
     manage_resolv_conf: bool = True,
 ) -> None:
-    state = DnsState(timeout=timeout)
+    state = DnsState()
     self_hosts = {"127.0.0.1", "::1", host}
     async with anyio.create_task_group() as tg:
         tg.start_soon(serve_udp, host, port, state)
         tg.start_soon(serve_tcp, host, port, state)
-        tg.start_soon(refresh_loop, state, self_hosts, interval)
+        tg.start_soon(refresh_loop, state, self_hosts, timeout)
         if manage_resolv_conf:
             tg.start_soon(hijack_loop, RESOLV_CONF, host, interval)

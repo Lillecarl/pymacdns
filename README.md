@@ -8,6 +8,6 @@ upstreams, and forwards with per-domain split-DNS routing.
 
 ## Layout
 
-- `src/pymacdns/scutil.py` — pure `scutil --dns` parsing + upstream selection
+- `src/pymacdns/store.py` — SCDynamicStore snapshot + change notifications
 - `src/pymacdns/resolver.py` — split-DNS routing + upstream forwarding
 - `src/pymacdns/server.py` — anyio UDP + TCP DNS server

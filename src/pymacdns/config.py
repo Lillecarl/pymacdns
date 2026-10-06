@@ -84,6 +84,7 @@ class GlobalConfig(BaseModel):
     interval: float = DEFAULT_INTERVAL
     route_filter: RouteFilter = RouteFilter.OFF
     control_socket: str = DEFAULT_CONTROL_SOCKET
+    control_socket_group: str | None = None
     marker_file: str | None = None
     resolv_conf: str | None = None
 

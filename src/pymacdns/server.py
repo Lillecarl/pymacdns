@@ -190,13 +190,18 @@ async def run(
                 refresh_loop, state, self_hosts, settings.server.timeout, config_path
             )
             tg.start_soon(
-                serve_control_guarded, settings.server.control_socket, state.cache
+                serve_control_guarded,
+                settings.server.control_socket,
+                state.cache,
+                settings.server.control_socket_group,
             )
 
 
-async def serve_control_guarded(path: str, cache: cache_mod.DnsCache) -> None:
+async def serve_control_guarded(
+    path: str, cache: cache_mod.DnsCache, group: str | None
+) -> None:
     try:
-        await control_mod.serve_control(path, cache)
+        await control_mod.serve_control(path, cache, group)
     except OSError as exc:
         print(f"pymacdns: control socket {path}: {exc}", file=sys.stderr)
 

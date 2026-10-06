@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="control socket path (overrides config file)",
     )
     parser.add_argument(
+        "--socket-group",
+        default=None,
+        help="group allowed onto the control socket (overrides config file)",
+    )
+    parser.add_argument(
         "--marker-file",
         default=None,
         help="maintain this file while running (overrides config file)",
@@ -73,6 +78,8 @@ def load_settings(args: argparse.Namespace) -> DaemonSettings:
         updates["interval"] = args.interval
     if args.socket is not None:
         updates["control_socket"] = args.socket
+    if args.socket_group is not None:
+        updates["control_socket_group"] = args.socket_group
     if args.marker_file is not None:
         updates["marker_file"] = args.marker_file
     if args.resolv_conf is not None:

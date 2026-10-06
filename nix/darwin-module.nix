@@ -23,6 +23,9 @@ let
           route_filter = cfg.routeFilter;
           control_socket = cfg.controlSocket;
         }
+        // lib.optionalAttrs (cfg.controlSocketGroup != null) {
+          control_socket_group = cfg.controlSocketGroup;
+        }
         // lib.optionalAttrs (cfg.resolvConf != null) {
           resolv_conf = cfg.resolvConf;
         };
@@ -85,6 +88,16 @@ in
       type = lib.types.str;
       default = "/var/run/pymacdns.sock";
       description = "Control socket for `pymacdns cache list|remove|clear`.";
+    };
+
+    controlSocketGroup = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "staff";
+      description = ''
+        Group allowed onto the control socket (chgrp + 0770 by the
+        root daemon); null keeps owner-only 0600.
+      '';
     };
 
     resolvConf = lib.mkOption {

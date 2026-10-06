@@ -1,4 +1,8 @@
-"""Control protocol: pure dispatch plus a socket round-trip."""
+"""Control protocol: pure dispatch plus socket round-trips."""
+
+import grp
+import stat
+from functools import partial
 
 import anyio
 import pytest
@@ -58,6 +62,35 @@ async def test_socket_round_trip(tmp_path):
                 sock, {"op": "remove", "name": "a.lab.", "qtype": "A"}
             )
             assert reply == {"removed": 1}
+            assert stat.S_IMODE(os.stat(sock).st_mode) == 0o600
+            tg.cancel_scope.cancel()
+    finally:
+        try:
+            os.unlink(sock)
+            os.rmdir(rundir)
+        except OSError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_socket_group_opens_to_group():
+    import os
+    import tempfile
+
+    rundir = tempfile.mkdtemp(prefix="pmdns", dir="/tmp")
+    sock = os.path.join(rundir, "ctl.sock")
+    # Own primary group: chown needs no privilege for this.
+    group = grp.getgrgid(os.getgid()).gr_name
+    try:
+        cache = filled_cache()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(partial(control_mod.serve_control, sock, cache, group))
+            await anyio.sleep(0.2)
+            st = os.stat(sock)
+            assert stat.S_IMODE(st.st_mode) == 0o770
+            assert st.st_gid == os.getgid()
+            reply = await control_mod.control_request(sock, {"op": "list"})
+            assert len(reply["entries"]) == 2
             tg.cancel_scope.cancel()
     finally:
         try:

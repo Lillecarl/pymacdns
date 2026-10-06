@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Final
 
@@ -64,15 +65,26 @@ def dispatch(
     return {"error": f"unknown op {op!r}"}
 
 
-async def serve_control(path: str, cache: cache_mod.DnsCache) -> None:
+async def serve_control(
+    path: str, cache: cache_mod.DnsCache, group: str | None = None
+) -> None:
+    """Serve the control socket, optionally opening it to a group.
+
+    Without a group the socket stays owner-only 0600. With one, the
+    socket is chgrp'd and widened to 0770. A failed chown raises: a
+    misspelled group or missing privilege must surface at startup,
+    not as a silently unreachable socket.
+    """
     target = Path(path)
     try:
         target.unlink(missing_ok=True)
     except OSError:
         pass
     listener = await anyio.create_unix_listener(str(target))
+    if group is not None:
+        shutil.chown(target, group=group)
     try:
-        target.chmod(0o600)
+        target.chmod(0o770 if group is not None else 0o600)
     except OSError:
         pass
     await listener.serve(lambda stream: handle_connection(stream, cache))

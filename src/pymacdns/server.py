@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 from typing import Final
 
 import anyio
+import dns.message
+import dns.rcode
 
+from pymacdns import cache as cache_mod
+from pymacdns import control as control_mod
 from pymacdns import resolver as resolver_mod
 from pymacdns import routes as routes_mod
 from pymacdns import store as store_mod
@@ -23,6 +27,7 @@ class DnsState:
     domains: dict[str, resolver_mod.Upstream] = field(default_factory=dict)
     routes: routes_mod.RouteTable = field(default_factory=routes_mod.RouteTable)
     route_filter: routes_mod.RouteFilter = routes_mod.RouteFilter.OFF
+    cache: cache_mod.DnsCache = field(default_factory=cache_mod.DnsCache)
 
     def pick(self, qname: str) -> resolver_mod.Upstream | None:
         return resolver_mod.pick_upstream(qname, self.domains, self.standard)
@@ -32,25 +37,50 @@ class DnsState:
         self.domains = dict(snap.domains)
 
 
+def finalize(stored: bytes, qid: int, state: DnsState) -> bytes:
+    """Filter, TTL-cap, and stamp the query ID onto a served response."""
+    filtered = routes_mod.filter_response(stored, state.routes, state.route_filter)
+    capped = cache_mod.cap_ttls(filtered)
+    try:
+        response = dns.message.from_wire(capped)
+    except Exception:
+        return capped
+    response.id = qid
+    return response.to_wire()
+
+
 async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
     try:
         special = resolver_mod.special_response(wire)
     except Exception:
         raise ValueError("unparseable DNS query")
     if special is not None:
-        return special
+        return cache_mod.cap_ttls(special)
     try:
-        qname = resolver_mod.question_name(wire)
+        request = dns.message.from_wire(wire)
+        key = cache_mod.key_of(wire)
     except Exception:
         raise ValueError("unparseable DNS query")
-    upstream = state.pick(qname)
-    if upstream is None:
-        return resolver_mod.servfail(wire)
+    entry = state.cache.get(key)
+    if entry is not None and not entry.dead(state.cache.clock()):
+        return finalize(entry.wire, request.id, state)
+    upstream = state.pick(key.name)
+    reply: bytes | None = None
     try:
+        if upstream is None:
+            raise ValueError("no upstream")
         reply = await resolver_mod.lookup(wire, upstream, use_tcp=use_tcp)
+        if dns.message.from_wire(reply).rcode() not in (
+            dns.rcode.NOERROR,
+            dns.rcode.NXDOMAIN,
+        ):
+            raise ValueError("upstream error")
     except Exception:
-        return resolver_mod.servfail(wire)
-    return routes_mod.filter_response(reply, state.routes, state.route_filter)
+        if entry is not None:
+            return finalize(entry.wire, request.id, state)
+        return reply if reply is not None else resolver_mod.servfail(wire)
+    state.cache.store(key, reply)
+    return finalize(reply, request.id, state)
 
 
 async def serve_udp_sock(
@@ -71,24 +101,26 @@ async def serve_udp_sock(
 
 
 async def _tcp_connection(stream: anyio.abc.SocketStream, state: DnsState) -> None:
-    async with stream:
+    async def recv_exact(count: int) -> bytes | None:
         buf = b""
-        while True:
-            while len(buf) < 2:
-                chunk = await stream.receive(2 - len(buf))
-                if not chunk:
-                    return
-                buf += chunk
-            length = int.from_bytes(buf[:2], "big")
-            buf = buf[2:]
-            while len(buf) < length:
-                chunk = await stream.receive(length - len(buf))
-                if not chunk:
-                    return
-                buf += chunk
-            wire, buf = buf[:length], buf[length:]
+        while len(buf) < count:
             try:
-                reply = await handle_wire(wire, state, use_tcp=True)
+                chunk = await stream.receive(count - len(buf))
+            except anyio.EndOfStream:
+                return None
+            buf += chunk
+        return buf
+
+    async with stream:
+        while True:
+            header = await recv_exact(2)
+            if header is None:
+                return
+            body = await recv_exact(int.from_bytes(header, "big"))
+            if body is None:
+                return
+            try:
+                reply = await handle_wire(body, state, use_tcp=True)
             except ValueError:
                 return
             await stream.send(len(reply).to_bytes(2, "big") + reply)
@@ -177,10 +209,20 @@ async def run(
             tg.start_soon(
                 refresh_loop, state, self_hosts, settings.server.timeout, config_path
             )
+            tg.start_soon(
+                serve_control_guarded, settings.server.control_socket, state.cache
+            )
             if manage_resolv_conf and bound:
                 tg.start_soon(
                     hijack_loop, RESOLV_CONF, bound, settings.server.interval
                 )
+
+
+async def serve_control_guarded(path: str, cache: cache_mod.DnsCache) -> None:
+    try:
+        await control_mod.serve_control(path, cache)
+    except OSError as exc:
+        print(f"pymacdns: control socket {path}: {exc}", file=sys.stderr)
 
 
 def _is_aliasable_loopback(host: str) -> bool:

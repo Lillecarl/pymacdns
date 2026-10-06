@@ -23,6 +23,7 @@ from pymacdns.resolver import _split_hostport
 from pymacdns.routes import RouteFilter
 
 DEFAULT_CONFIG_PATH: Final = "/etc/pymacdns/config.toml"
+DEFAULT_CONTROL_SOCKET: Final = "/var/run/pymacdns.sock"
 DEFAULT_LISTEN: Final = ["127.0.0.1:53", "[::1]:53"]
 DEFAULT_TIMEOUT: Final = 2.0
 DEFAULT_INTERVAL: Final = 1.0
@@ -82,6 +83,7 @@ class GlobalConfig(BaseModel):
     timeout: float = DEFAULT_TIMEOUT
     interval: float = DEFAULT_INTERVAL
     route_filter: RouteFilter = RouteFilter.OFF
+    control_socket: str = DEFAULT_CONTROL_SOCKET
 
 
 class FileConfig(BaseModel):

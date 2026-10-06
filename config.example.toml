@@ -21,6 +21,12 @@ interval = 1.0
 # default), "family" (drop whole A/AAAA sets with no usable route),
 # or "prefix" (drop individual addresses with no covering route).
 # route_filter = "off"
+# Control socket for `pymacdns cache list|remove|clear`.
+# control_socket = "/var/run/pymacdns.sock"
+
+# The daemon answers from cache when entries are fresh (client TTLs
+# are capped at 10s), revalidates dead entries upstream, and serves
+# stale answers when upstream fails. NXDOMAIN counts as success.
 
 # Force all DNS through a filtering resolver first. Remove the comment
 # to enable. Longest domain match still wins for configured domains.

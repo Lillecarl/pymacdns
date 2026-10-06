@@ -10,6 +10,12 @@ from pymacdns import latency as latency_mod
 from pymacdns import resolver as resolver_mod
 
 
+def summarize_one(stats: latency_mod.LatencyStats, ns: str):
+    rows = [row for row in stats.summary() if row.nameserver == ns]
+    assert len(rows) == 1
+    return rows[0]
+
+
 def test_observe_fills_cumulative_buckets():
     histogram = latency_mod.Histogram()
     histogram.observe(0.003)
@@ -24,13 +30,13 @@ def test_quantiles_and_mean():
     stats = latency_mod.LatencyStats()
     for _ in range(100):
         stats.record_ok("tls://9.9.9.9", 0.040)
-    row = stats.summary()["tls://9.9.9.9"]
-    assert row["count"] == 100
-    assert row["errors"] == 0
-    assert row["mean_ms"] == pytest.approx(40.0)
-    assert row["p50_ms"] == 50.0
-    assert row["p95_ms"] == 50.0
-    assert row["p99_ms"] == 50.0
+    row = summarize_one(stats, "tls://9.9.9.9")
+    assert row.count == 100
+    assert row.errors == 0
+    assert row.mean_ms == pytest.approx(40.0)
+    assert row.p50_ms == 50.0
+    assert row.p95_ms == 50.0
+    assert row.p99_ms == 50.0
 
 
 def test_tail_quantile_sees_outliers():
@@ -38,9 +44,9 @@ def test_tail_quantile_sees_outliers():
     for _ in range(9):
         stats.record_ok("tls://9.9.9.9", 0.005)
     stats.record_ok("tls://9.9.9.9", 0.500)
-    row = stats.summary()["tls://9.9.9.9"]
-    assert row["p50_ms"] == 5.0
-    assert row["p95_ms"] == 500.0
+    row = summarize_one(stats, "tls://9.9.9.9")
+    assert row.p50_ms == 5.0
+    assert row.p95_ms == 500.0
 
 
 def test_errors_counted_apart():
@@ -48,14 +54,13 @@ def test_errors_counted_apart():
     stats.record_ok("tls://9.9.9.9", 0.040)
     stats.record_err("tls://9.9.9.9")
     stats.record_err("tls://9.9.9.9")
-    row = stats.summary()["tls://9.9.9.9"]
-    assert row["count"] == 1
-    assert row["errors"] == 2
+    row = summarize_one(stats, "tls://9.9.9.9")
+    assert row.count == 1
+    assert row.errors == 2
 
 
 def test_empty_histogram_is_zero():
-    row = latency_mod.LatencyStats().summary()
-    assert row == {}
+    assert latency_mod.LatencyStats().summary() == []
     assert latency_mod.Histogram().quantile(0.99) == 0.0
     assert latency_mod.Histogram().mean() == 0.0
 
@@ -63,7 +68,7 @@ def test_empty_histogram_is_zero():
 def test_beyond_last_bucket_is_infinite():
     stats = latency_mod.LatencyStats()
     stats.record_ok("tls://9.9.9.9", 60.0)
-    assert stats.summary()["tls://9.9.9.9"]["p99_ms"] == float("inf")
+    assert summarize_one(stats, "tls://9.9.9.9").p99_ms == float("inf")
     assert "+Inf" in latency_mod.format_table(stats.summary())
 
 
@@ -96,11 +101,10 @@ async def test_lookup_records_winner_and_errors():
             reply = await resolver_mod.lookup(wire, upstream, stats=stats)
             assert dns.message.from_wire(reply).rcode() == dns.rcode.NOERROR
             tg.cancel_scope.cancel()
-    summary = stats.summary()
-    assert summary[bad]["errors"] == 1
-    assert summary[bad]["count"] == 0
-    assert summary[good]["count"] == 1
-    assert summary[good]["errors"] == 0
+    assert summarize_one(stats, bad).errors == 1
+    assert summarize_one(stats, bad).count == 0
+    assert summarize_one(stats, good).count == 1
+    assert summarize_one(stats, good).errors == 0
 
 
 @pytest.mark.anyio
@@ -119,7 +123,7 @@ async def test_lookup_records_nothing_unobserved():
             upstream = resolver_mod.Upstream([good, "127.0.0.1:9"], timeout=2.0)
             await resolver_mod.lookup(wire, upstream, stats=stats)
             tg.cancel_scope.cancel()
-    assert list(stats.summary()) == [good]
+    assert [row.nameserver for row in stats.summary()] == [good]
 
 
 @pytest.mark.anyio
@@ -142,8 +146,8 @@ async def test_handle_wire_records_upstream_latency():
             )
             assert out.rcode() == dns.rcode.NOERROR
             tg.cancel_scope.cancel()
-    row = state.latency.summary()[f"127.0.0.1:{port}"]
-    assert row["count"] == 1
+    row = summarize_one(state.latency, f"127.0.0.1:{port}")
+    assert row.count == 1
 
 
 def test_dispatch_latency_op():

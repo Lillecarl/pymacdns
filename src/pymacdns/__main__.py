@@ -4,6 +4,7 @@ import argparse
 import sys
 
 import anyio
+import httpx
 from pydantic import ValidationError
 
 from pymacdns import installer as installer_mod
@@ -151,7 +152,22 @@ async def latency_main(args: argparse.Namespace) -> int:
     if not summary:
         print("pymacdns: no observations yet")
         return 0
-    print(latency_mod.format_table(summary))
+    print(
+        latency_mod.format_table(
+            [
+                latency_mod.UpstreamSummary(
+                    nameserver=ns,
+                    count=row["count"],
+                    errors=row["errors"],
+                    mean_ms=row["mean_ms"],
+                    p50_ms=row["p50_ms"],
+                    p95_ms=row["p95_ms"],
+                    p99_ms=row["p99_ms"],
+                )
+                for ns, row in sorted(summary.items())
+            ]
+        )
+    )
     return 0
 
 
@@ -165,14 +181,17 @@ async def status_main(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 - report, don't trace
         print(f"pymacdns: cannot read resolvers: {exc}", file=sys.stderr)
         return 1
-    rows = status_mod.describe_targets(snap)
-    if not rows:
+    targets = status_mod.describe_targets(snap)
+    if not targets:
         print("pymacdns: no upstreams discovered", file=sys.stderr)
         return 1
-    results = await status_mod.check(
-        [ns for _, ns in rows], settings.server.timeout
-    )
-    print(status_mod.render(rows, results))
+    # One shared client like the daemon's: status then measures the
+    # pooled steady state instead of nine cold handshakes per upstream.
+    async with httpx.AsyncClient(http2=True) as client:
+        rows = await status_mod.check(
+            targets, settings.server.timeout, doh_client=client
+        )
+    print(status_mod.render(rows))
     print(
         f"{len(rows)} upstreams, {len(status_mod.PROBES)} probes, "
         f"timeout {settings.server.timeout}s"

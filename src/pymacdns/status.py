@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ssl
 import time
+from dataclasses import dataclass, field
 
 import anyio
 import dns.exception
@@ -20,60 +21,100 @@ import httpx
 from pymacdns import resolver as resolver_mod
 from pymacdns import store as store_mod
 
-# (name, type) pairs. example.com covers the common types against one
-# zone; the last two are diagnostics: a AAAA-only name and a name
-# whose signature is bogus on purpose.
-PROBES: tuple[tuple[str, str], ...] = (
-    ("example.com.", "A"),
-    ("example.com.", "AAAA"),
-    ("example.com.", "MX"),
-    ("example.com.", "TXT"),
-    ("example.com.", "SOA"),
-    ("example.com.", "NS"),
-    ("example.com.", "DNSKEY"),
-    ("ipv6.google.com.", "AAAA"),
-    ("dnssec-failed.org.", "A"),
+
+@dataclass(frozen=True)
+class Probe:
+    name: str
+    qtype: str
+
+
+@dataclass(frozen=True)
+class Target:
+    scope: str
+    nameserver: str
+
+
+@dataclass
+class Outcome:
+    latency_ms: float | None = None
+    rcode: str | None = None
+    error: str | None = None
+
+    def cell(self) -> str:
+        if self.latency_ms is not None:
+            return f"{self.latency_ms:.0f}ms"
+        if self.rcode is not None:
+            return self.rcode
+        if self.error is not None:
+            return self.error
+        return "-"
+
+
+@dataclass
+class Row:
+    target: Target
+    outcomes: dict[Probe, Outcome] = field(default_factory=dict)
+
+
+# example.com covers the common types against one zone; the last two
+# are diagnostics: a AAAA-only name and a name whose signature is
+# bogus on purpose.
+PROBES: tuple[Probe, ...] = (
+    Probe("example.com.", "A"),
+    Probe("example.com.", "AAAA"),
+    Probe("example.com.", "MX"),
+    Probe("example.com.", "TXT"),
+    Probe("example.com.", "SOA"),
+    Probe("example.com.", "NS"),
+    Probe("example.com.", "DNSKEY"),
+    Probe("ipv6.google.com.", "AAAA"),
+    Probe("dnssec-failed.org.", "A"),
 )
 
 
-def describe_targets(snap: store_mod.Snapshot) -> list[tuple[str, str]]:
-    """Distinct (scope, nameserver) rows: scope is the routing domain or default."""
-    rows: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+def describe_targets(snap: store_mod.Snapshot) -> list[Target]:
+    """Distinct targets: scope is the routing domain, or default."""
+    targets: list[Target] = []
+    seen: set[Target] = set()
 
     def add(scope: str, nameservers: list[str]) -> None:
         for ns in nameservers:
-            if (scope, ns) not in seen:
-                seen.add((scope, ns))
-                rows.append((scope, ns))
+            target = Target(scope, ns)
+            if target not in seen:
+                seen.add(target)
+                targets.append(target)
 
     if snap.standard is not None:
         add("default", snap.standard.nameservers)
     for domain in sorted(snap.domains):
         add(domain, snap.domains[domain].nameservers)
-    return rows
+    return targets
 
 
-def cell_for(result: object) -> str:
-    """Render one probe outcome: latency, rcode, or short error."""
-    if isinstance(result, float):
-        return f"{result:.0f}ms"
-    return str(result)
+def column_labels(probes: tuple[Probe, ...] = PROBES) -> list[str]:
+    """Header labels: types, prefixed where a type repeats across names."""
+    seen: set[str] = set()
+    labels = []
+    for probe in probes:
+        if probe.qtype in seen:
+            labels.append(f"{probe.name.split('.')[0]}:{probe.qtype}")
+        else:
+            labels.append(probe.qtype)
+            seen.add(probe.qtype)
+    return labels
 
 
 async def probe_one(
     nameserver: str,
-    name: str,
-    qtype: str,
+    probe: Probe,
     timeout: float,
-    results: dict[tuple[str, tuple[str, str]], object],
+    found: list[tuple[str, Probe, Outcome]],
     ssl_context: ssl.SSLContext | None = None,
     doh_client: httpx.AsyncClient | None = None,
 ) -> None:
-    key = (nameserver, (name, qtype))
     start = time.monotonic()
     try:
-        query = dns.message.make_query(name, qtype)
+        query = dns.message.make_query(probe.name, probe.qtype)
         reply = await resolver_mod.lookup(
             query.to_wire(),
             resolver_mod.Upstream([nameserver], timeout),
@@ -82,60 +123,66 @@ async def probe_one(
         )
         rcode = dns.message.from_wire(reply).rcode()
         if rcode == dns.rcode.NOERROR:
-            results[key] = (time.monotonic() - start) * 1000.0
+            outcome = Outcome(latency_ms=(time.monotonic() - start) * 1000.0)
         else:
-            results[key] = dns.rcode.to_text(rcode)
+            outcome = Outcome(rcode=dns.rcode.to_text(rcode))
     except (TimeoutError, dns.exception.Timeout):
-        results[key] = "timeout"
+        outcome = Outcome(error="timeout")
     except OSError:
-        results[key] = "conn"
+        outcome = Outcome(error="conn")
     except ValueError:
-        results[key] = "bad"
+        outcome = Outcome(error="bad")
     except Exception:  # noqa: BLE001 - one bad probe must not kill the table
-        results[key] = "err"
+        outcome = Outcome(error="err")
+    found.append((nameserver, probe, outcome))
 
 
 async def check(
-    nameservers: list[str],
+    targets: list[Target],
     timeout: float,
-    probes: tuple[tuple[str, str], ...] = PROBES,
+    probes: tuple[Probe, ...] = PROBES,
     ssl_context: ssl.SSLContext | None = None,
     doh_client: httpx.AsyncClient | None = None,
-) -> dict[tuple[str, tuple[str, str]], object]:
-    """Probe every nameserver across every probe concurrently."""
-    results: dict[tuple[str, tuple[str, str]], object] = {}
+) -> list[Row]:
+    """Probe every target across every probe concurrently, in order."""
+    found: list[tuple[str, Probe, Outcome]] = []
     async with anyio.create_task_group() as tg:
-        for ns in nameservers:
-            for name, qtype in probes:
+        for target in targets:
+            for probe in probes:
                 tg.start_soon(
                     probe_one,
-                    ns,
-                    name,
-                    qtype,
+                    target.nameserver,
+                    probe,
                     timeout,
-                    results,
+                    found,
                     ssl_context,
                     doh_client,
                 )
-    return results
-
-
-def render(
-    rows: list[tuple[str, str]],
-    results: dict[tuple[str, tuple[str, str]], object],
-    probes: tuple[tuple[str, str], ...] = PROBES,
-) -> str:
-    """Align the matrix: one row per upstream, one column per probe."""
-    head = ["UPSTREAM", "SCOPE"] + [qtype for _, qtype in probes]
-    table = [head]
-    for scope, ns in rows:
-        table.append(
-            [ns, scope]
-            + [cell_for(results.get((ns, probe), "-")) for probe in probes]
+    by_nameserver = {(ns, probe): outcome for ns, probe, outcome in found}
+    return [
+        Row(
+            target,
+            {
+                probe: by_nameserver.get((target.nameserver, probe), Outcome())
+                for probe in probes
+            },
         )
-    widths = [max(len(row[i]) for row in table) for i in range(len(head))]
+        for target in targets
+    ]
+
+
+def render(rows: list[Row], probes: tuple[Probe, ...] = PROBES) -> str:
+    """Align the matrix: one row per upstream, one column per probe."""
+    head = ["UPSTREAM", "SCOPE"] + column_labels(probes)
+    table = [head]
+    for row in rows:
+        table.append(
+            [row.target.nameserver, row.target.scope]
+            + [row.outcomes.get(probe, Outcome()).cell() for probe in probes]
+        )
+    widths = [max(len(line[i]) for line in table) for i in range(len(head))]
     lines = [
-        "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
-        for row in table
+        "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(line)).rstrip()
+        for line in table
     ]
     return "\n".join(lines)

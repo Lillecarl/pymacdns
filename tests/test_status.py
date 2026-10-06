@@ -19,27 +19,49 @@ def test_describe_targets_dedups_and_orders():
         },
     )
     assert status_mod.describe_targets(snap) == [
-        ("default", "tls://9.9.9.9"),
-        ("default", "9.9.9.9"),
-        ("dynami.st.", "10.0.250.1"),
-        ("example.com.", "tls://9.9.9.9"),
+        status_mod.Target("default", "tls://9.9.9.9"),
+        status_mod.Target("default", "9.9.9.9"),
+        status_mod.Target("dynami.st.", "10.0.250.1"),
+        status_mod.Target("example.com.", "tls://9.9.9.9"),
+    ]
+
+
+def test_column_labels_prefix_repeats():
+    probes = (
+        status_mod.Probe("example.com.", "A"),
+        status_mod.Probe("example.com.", "AAAA"),
+    )
+    assert status_mod.column_labels(probes) == ["A", "AAAA"]
+    assert status_mod.column_labels(status_mod.PROBES)[-2:] == [
+        "ipv6:AAAA",
+        "dnssec-failed:A",
     ]
 
 
 def test_render_aligns_cells():
-    rows = [("default", "tls://9.9.9.9"), ("default", "9.9.9.9")]
-    probes = (("example.com.", "A"), ("example.com.", "AAAA"))
-    results = {
-        ("tls://9.9.9.9", ("example.com.", "A")): 41.2,
-        ("tls://9.9.9.9", ("example.com.", "AAAA")): "SERVFAIL",
-        ("9.9.9.9", ("example.com.", "A")): "timeout",
-    }
-    text = status_mod.render(rows, results, probes)
-    lines = text.splitlines()
+    probes = (
+        status_mod.Probe("example.com.", "A"),
+        status_mod.Probe("example.com.", "AAAA"),
+    )
+    rows = [
+        status_mod.Row(
+            status_mod.Target("default", "tls://9.9.9.9"),
+            {
+                probes[0]: status_mod.Outcome(latency_ms=41.2),
+                probes[1]: status_mod.Outcome(rcode="SERVFAIL"),
+            },
+        ),
+        status_mod.Row(
+            status_mod.Target("default", "9.9.9.9"),
+            {probes[0]: status_mod.Outcome(error="timeout")},
+        ),
+    ]
+    lines = status_mod.render(rows, probes).splitlines()
     assert lines[0].split() == ["UPSTREAM", "SCOPE", "A", "AAAA"]
     assert "41ms" in lines[1] and "SERVFAIL" in lines[1]
     assert "timeout" in lines[2] and lines[2].rstrip().endswith("-")
-    assert lines[1].index("default") == lines[2].index("default") > 0
+    padded = "9.9.9.9".ljust(len("tls://9.9.9.9"))
+    assert lines[2][: len(padded)] == padded
 
 
 @pytest.mark.anyio
@@ -54,28 +76,32 @@ async def test_check_live_and_unreachable():
     udp_sock = await anyio.create_udp_socket(
         local_host="127.0.0.1", local_port=plain_port
     )
-    probes = (("example.com.", "A"), ("example.com.", "AAAA"))
-    nameservers = [
-        f"127.0.0.1:{plain_port}",
-        f"tls://127.0.0.1:{tls_port}",
-        "tls://127.0.0.1:9",
-        "gopher://127.0.0.1",
+    probes = (
+        status_mod.Probe("example.com.", "A"),
+        status_mod.Probe("example.com.", "AAAA"),
+    )
+    targets = [
+        status_mod.Target("default", f"127.0.0.1:{plain_port}"),
+        status_mod.Target("default", f"tls://127.0.0.1:{tls_port}"),
+        status_mod.Target("default", "tls://127.0.0.1:9"),
+        status_mod.Target("default", "gopher://127.0.0.1"),
     ]
     async with plain_listener, udp_sock:
         async with anyio.create_task_group() as tg:
             tg.start_soon(tls_listener.serve, answer_tls)
             tg.start_soon(answer_plain_udp, udp_sock)
             await anyio.sleep(0.2)
-            results = await status_mod.check(
-                nameservers, 2.0, probes, ssl_context=client_ctx
+            rows = await status_mod.check(
+                targets, 2.0, probes, ssl_context=client_ctx
             )
             tg.cancel_scope.cancel()
-    for ns in nameservers[:2]:
+    assert [row.target for row in rows] == targets
+    for row in rows[:2]:
         for probe in probes:
-            assert isinstance(results[(ns, probe)], float), (ns, probe)
-    refused = results[("tls://127.0.0.1:9", ("example.com.", "A"))]
-    assert refused in ("conn", "timeout"), refused
-    assert results[("gopher://127.0.0.1", ("example.com.", "A"))] == "bad"
+            assert isinstance(row.outcomes[probe].latency_ms, float)
+    refused = rows[2].outcomes[probes[0]]
+    assert refused.latency_ms is None and refused.error in ("conn", "timeout")
+    assert rows[3].outcomes[probes[0]].error == "bad"
 
 
 @pytest.mark.anyio
@@ -112,10 +138,11 @@ def test_status_main_wires_snapshot(monkeypatch, tmp_path):
     )
     seen: dict[str, object] = {}
 
-    async def fake_check(nameservers: list[str], timeout: float) -> dict:
-        seen["nameservers"] = nameservers
+    async def fake_check(targets, timeout, doh_client=None):
+        seen["targets"] = targets
         seen["timeout"] = timeout
-        return {}
+        seen["client"] = doh_client
+        return [status_mod.Row(target, {}) for target in targets]
 
     def fake_snapshot(timeout: float, self_hosts: set[str], path: str):
         seen["self_hosts"] = self_hosts
@@ -126,10 +153,11 @@ def test_status_main_wires_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(store_mod, "snapshot_once", fake_snapshot)
     monkeypatch.setattr(status_mod, "check", fake_check)
     monkeypatch.setattr(
-        status_mod, "render", lambda rows, results: f"{len(rows)} rows"
+        status_mod, "render", lambda rows: f"{len(rows)} rows"
     )
     code = anyio.run(main_mod.status_main, args)
     assert code == 0
     assert seen["timeout"] == 2.0
-    assert seen["nameservers"] == ["9.9.9.9"]
+    assert seen["targets"] == [status_mod.Target("default", "9.9.9.9")]
     assert seen["self_hosts"] == {"127.0.0.1"}
+    assert seen["client"] is not None

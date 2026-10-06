@@ -68,22 +68,44 @@ class LatencyStats:
     def record_err(self, nameserver: str) -> None:
         self._histogram(nameserver).fail()
 
-    def summary(self) -> dict[str, dict[str, float]]:
-        out = {}
-        for ns in sorted(self.histograms):
-            histogram = self.histograms[ns]
-            out[ns] = {
-                "count": float(histogram.count),
-                "errors": float(histogram.errors),
-                "mean_ms": histogram.mean(),
-                "p50_ms": histogram.quantile(0.5),
-                "p95_ms": histogram.quantile(0.95),
-                "p99_ms": histogram.quantile(0.99),
-            }
-        return out
+    def summary(self) -> list[UpstreamSummary]:
+        return [
+            UpstreamSummary(
+                nameserver=ns,
+                count=histogram.count,
+                errors=histogram.errors,
+                mean_ms=histogram.mean(),
+                p50_ms=histogram.quantile(0.5),
+                p95_ms=histogram.quantile(0.95),
+                p99_ms=histogram.quantile(0.99),
+            )
+            for ns, histogram in sorted(self.histograms.items())
+        ]
 
 
-def format_table(summary: dict[str, dict[str, float]]) -> str:
+@dataclass
+class UpstreamSummary:
+    nameserver: str
+    count: int
+    errors: int
+    mean_ms: float
+    p50_ms: float
+    p95_ms: float
+    p99_ms: float
+
+    def payload(self) -> dict[str, float]:
+        """The JSON-facing shape: everything but the key it hangs under."""
+        return {
+            "count": self.count,
+            "errors": self.errors,
+            "mean_ms": self.mean_ms,
+            "p50_ms": self.p50_ms,
+            "p95_ms": self.p95_ms,
+            "p99_ms": self.p99_ms,
+        }
+
+
+def format_table(summaries: list[UpstreamSummary]) -> str:
     """Align per-upstream quantiles; +Inf means beyond the last bucket."""
     head = ["UPSTREAM", "COUNT", "ERR", "MEAN", "P50", "P95", "P99"]
 
@@ -91,17 +113,16 @@ def format_table(summary: dict[str, dict[str, float]]) -> str:
         return "+Inf" if value == float("inf") else f"{value:.0f}ms"
 
     table = [head]
-    for ns in sorted(summary):
-        row = summary[ns]
+    for summary in summaries:
         table.append(
             [
-                ns,
-                str(int(row["count"])),
-                str(int(row["errors"])),
-                show(row["mean_ms"]),
-                show(row["p50_ms"]),
-                show(row["p95_ms"]),
-                show(row["p99_ms"]),
+                summary.nameserver,
+                str(summary.count),
+                str(summary.errors),
+                show(summary.mean_ms),
+                show(summary.p50_ms),
+                show(summary.p95_ms),
+                show(summary.p99_ms),
             ]
         )
     widths = [max(len(row[i]) for row in table) for i in range(len(head))]

@@ -52,7 +52,12 @@ def dispatch(
     if op == "pid":
         return {"pid": os.getpid()}
     if op == "latency":
-        return {"latency": stats.summary() if stats is not None else {}}
+        summaries = stats.summary() if stats is not None else []
+        return {
+            "latency": {
+                summary.nameserver: summary.payload() for summary in summaries
+            }
+        }
     if op == "clear":
         return {"cleared": cache.clear()}
     if op == "remove":

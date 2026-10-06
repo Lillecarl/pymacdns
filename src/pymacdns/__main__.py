@@ -36,9 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="maintain this file while running (overrides config file)",
     )
     parser.add_argument(
-        "--no-resolv-conf",
-        action="store_true",
-        help="do not keep /etc/resolv.conf pointed at us",
+        "--resolv-conf",
+        default=None,
+        help="manage this resolv.conf while running (dummy path for tests)",
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("dump", help="print live macOS resolvers as TOML")
@@ -75,6 +75,8 @@ def load_settings(args: argparse.Namespace) -> DaemonSettings:
         updates["control_socket"] = args.socket
     if args.marker_file is not None:
         updates["marker_file"] = args.marker_file
+    if args.resolv_conf is not None:
+        updates["resolv_conf"] = args.resolv_conf
     if updates:
         settings = settings.model_copy(
             update={"server": settings.server.model_copy(update=updates)}
@@ -128,13 +130,16 @@ def serve_main(args: argparse.Namespace) -> int:
         installers.append(
             installer_mod.FileMarker(path=settings.server.marker_file)
         )
+    if settings.server.resolv_conf is not None:
+        installers.append(
+            installer_mod.ResolvConf(
+                path=settings.server.resolv_conf,
+                nameservers=[host for host, _ in settings.server.listen],
+            )
+        )
 
     async def child_main() -> None:
-        await server_mod.run(
-            settings,
-            config_path=args.config,
-            manage_resolv_conf=not args.no_resolv_conf,
-        )
+        await server_mod.run(settings, config_path=args.config)
 
     try:
         return run_supervised(installers, child_main)

@@ -5,7 +5,6 @@ import errno
 import ipaddress
 import sys
 from dataclasses import dataclass, field
-from typing import Final
 
 import anyio
 import dns.message
@@ -17,8 +16,6 @@ from pymacdns import resolver as resolver_mod
 from pymacdns import routes as routes_mod
 from pymacdns import store as store_mod
 from pymacdns.config import DEFAULT_CONFIG_PATH, DaemonSettings
-
-RESOLV_CONF: Final = "/etc/resolv.conf"
 
 
 @dataclass
@@ -147,26 +144,9 @@ async def refresh_loop(
         prev = snap
 
 
-async def hijack_loop(path: str, hosts: list[str], interval: float) -> None:
-    wanted = "".join(f"nameserver {host}\n" for host in hosts)
-    target = anyio.Path(path)
-    while True:
-        try:
-            try:
-                current = await target.read_text()
-            except FileNotFoundError:
-                current = ""
-            if current != wanted:
-                await target.write_text(wanted)
-        except OSError:  # noqa: BLE001 - e.g. no permission, retry next tick
-            pass
-        await anyio.sleep(interval)
-
-
 async def run(
     settings: DaemonSettings,
     config_path: str = DEFAULT_CONFIG_PATH,
-    manage_resolv_conf: bool = True,
 ) -> None:
     state = DnsState(route_filter=settings.server.route_filter)
     udp_socks: list[anyio.abc.UDPSocket] = []
@@ -212,10 +192,6 @@ async def run(
             tg.start_soon(
                 serve_control_guarded, settings.server.control_socket, state.cache
             )
-            if manage_resolv_conf and bound:
-                tg.start_soon(
-                    hijack_loop, RESOLV_CONF, bound, settings.server.interval
-                )
 
 
 async def serve_control_guarded(path: str, cache: cache_mod.DnsCache) -> None:

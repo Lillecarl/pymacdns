@@ -85,6 +85,7 @@ class GlobalConfig(BaseModel):
     route_filter: RouteFilter = RouteFilter.OFF
     control_socket: str = DEFAULT_CONTROL_SOCKET
     marker_file: str | None = None
+    resolv_conf: str | None = None
 
 
 class FileConfig(BaseModel):

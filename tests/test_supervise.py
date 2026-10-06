@@ -28,8 +28,10 @@ def proc_env() -> dict[str, str]:
     return env
 
 
-def base_args(marker: Path, control_sock: str, port: int) -> list[str]:
-    return [
+def base_args(
+    marker: Path, control_sock: str, port: int, resolv: Path | None = None
+) -> list[str]:
+    args = [
         sys.executable,
         "-m",
         "pymacdns",
@@ -41,8 +43,10 @@ def base_args(marker: Path, control_sock: str, port: int) -> list[str]:
         f"127.0.0.1:{port}",
         "--socket",
         control_sock,
-        "--no-resolv-conf",
     ]
+    if resolv is not None:
+        args += ["--resolv-conf", str(resolv)]
+    return args
 
 
 async def wait_for(path: Path, timeout: float = 10.0) -> None:
@@ -66,10 +70,12 @@ def port_free(port: int) -> bool:
         sock.close()
 
 
-async def spawn(marker: Path, tag: str, port: int, wait: bool = True):
+async def spawn(
+    marker: Path, tag: str, port: int, wait: bool = True, resolv: Path | None = None
+):
     control_sock = f"/tmp/pmdns-{os.getpid()}-{tag}.sock"
     proc = await anyio.open_process(
-        base_args(marker, control_sock, port), cwd=ROOT, env=proc_env()
+        base_args(marker, control_sock, port, resolv), cwd=ROOT, env=proc_env()
     )
     if wait:
         await wait_for(marker)
@@ -157,5 +163,30 @@ async def test_failed_install_exits_nonzero(tmp_path):
         with anyio.fail_after(60):
             code = await proc.wait()
             assert code != 0
+    finally:
+        await reap(proc)
+
+
+@pytest.mark.anyio
+async def test_resolv_conf_managed_and_restored(tmp_path):
+    """The daemon's block is present while running, gone after exit."""
+    from pymacdns.installer import BEGIN_MARK
+
+    dummy = tmp_path / "resolv.conf"
+    dummy.write_text("nameserver 9.9.9.9\n")
+    before = dummy.read_bytes()
+    marker = tmp_path / "installed"
+    proc, _ = await spawn(marker, "rc", 15525, resolv=dummy)
+    try:
+        with anyio.fail_after(60):
+            with anyio.fail_after(10):
+                while BEGIN_MARK not in dummy.read_text():
+                    await anyio.sleep(0.05)
+            running = dummy.read_text()
+            assert "nameserver 127.0.0.1\n" in running
+            assert "nameserver 9.9.9.9\n" in running
+            proc.terminate()
+            await proc.wait()
+            assert dummy.read_bytes() == before
     finally:
         await reap(proc)

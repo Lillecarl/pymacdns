@@ -23,6 +23,9 @@ interval = 1.0
 # route_filter = "off"
 # Control socket for `pymacdns cache list|remove|clear`.
 # control_socket = "/var/run/pymacdns.sock"
+# Point a resolv.conf at our listeners while running; cleanup removes
+# only our delimited block. Pass a dummy path to test without root.
+# resolv_conf = "/etc/resolv.conf"
 
 # The daemon answers from cache when entries are fresh (client TTLs
 # are capped at 10s), revalidates dead entries upstream, and serves

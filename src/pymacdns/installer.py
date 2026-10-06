@@ -131,6 +131,12 @@ class ResolvConf:
     path: str
     nameservers: list[str]
 
+    def _target(self) -> str:
+        # Through the link, never instead of it: /etc/resolv.conf is a
+        # symlink to /private/var/run/resolv.conf, and os.replace on the
+        # link path would swap the link itself for a regular file.
+        return os.path.realpath(self.path)
+
     def block(self) -> str:
         lines = [
             BEGIN_MARK,
@@ -140,8 +146,9 @@ class ResolvConf:
         return "\n".join(lines) + "\n"
 
     def install(self) -> None:
+        target = self._target()
         try:
-            original = Path(self.path).read_text(encoding="utf-8")
+            original = Path(target).read_text(encoding="utf-8")
         except FileNotFoundError:
             original = ""
         span = _block_span(original)
@@ -156,11 +163,12 @@ class ResolvConf:
             lines = original.splitlines(keepends=True)
             updated = "".join(lines[:start]) + self.block() + "".join(lines[end:])
         if updated != original:
-            _atomic_write(self.path, updated)
+            _atomic_write(target, updated)
 
     def cleanup(self) -> None:
+        target = self._target()
         try:
-            original = Path(self.path).read_text(encoding="utf-8")
+            original = Path(target).read_text(encoding="utf-8")
         except FileNotFoundError:
             return
         span = _block_span(original)
@@ -171,6 +179,6 @@ class ResolvConf:
         rest = "".join(lines[:start] + lines[end:])
         if rest.strip() == "":
             with contextlib.suppress(FileNotFoundError):
-                os.unlink(self.path)
+                os.unlink(target)
         else:
-            _atomic_write(self.path, rest)
+            _atomic_write(target, rest)

@@ -104,3 +104,18 @@ def test_mode_preserved(tmp_path):
     inst.cleanup()
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
     assert target.read_text() == "nameserver 9.9.9.9\n"
+
+
+def test_symlink_is_followed_not_replaced(tmp_path):
+    """Like /etc/resolv.conf -> ../var/run/resolv.conf: the link stays."""
+    real = tmp_path / "real-resolv.conf"
+    real.write_text("nameserver 9.9.9.9\n")
+    link = tmp_path / "resolv.conf"
+    link.symlink_to(real.name)
+    inst = ResolvConf(str(link), ["127.0.0.1"])
+    inst.install()
+    assert link.is_symlink()
+    assert BEGIN_MARK in real.read_text()
+    inst.cleanup()
+    assert link.is_symlink()
+    assert real.read_bytes() == b"nameserver 9.9.9.9\n"

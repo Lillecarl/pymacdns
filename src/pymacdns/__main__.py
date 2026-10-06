@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from pymacdns import installer as installer_mod
 from pymacdns import server as server_mod
+from pymacdns import status as status_mod
+from pymacdns import store as store_mod
 from pymacdns.config import DEFAULT_CONFIG_PATH, DaemonSettings, parse_listen
 from pymacdns.control import control_request
 from pymacdns.store import dump_toml
@@ -47,6 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("dump", help="print live macOS resolvers as TOML")
+    sub.add_parser(
+        "status", help="probe effective upstreams across names and types"
+    )
     cache_parser = sub.add_parser("cache", help="inspect the daemon cache")
     cache_sub = cache_parser.add_subparsers(dest="cache_op", required=True)
     cache_sub.add_parser("list", help="list cached entries")
@@ -130,6 +135,31 @@ async def cache_main(args: argparse.Namespace) -> int:
     return 0
 
 
+async def status_main(args: argparse.Namespace) -> int:
+    settings = load_settings(args)
+    self_hosts = {host for host, _ in settings.server.listen}
+    try:
+        snap = store_mod.snapshot_once(
+            settings.server.timeout, self_hosts, args.config
+        )
+    except Exception as exc:  # noqa: BLE001 - report, don't trace
+        print(f"pymacdns: cannot read resolvers: {exc}", file=sys.stderr)
+        return 1
+    rows = status_mod.describe_targets(snap)
+    if not rows:
+        print("pymacdns: no upstreams discovered", file=sys.stderr)
+        return 1
+    results = await status_mod.check(
+        [ns for _, ns in rows], settings.server.timeout
+    )
+    print(status_mod.render(rows, results))
+    print(
+        f"{len(rows)} upstreams, {len(status_mod.PROBES)} probes, "
+        f"timeout {settings.server.timeout}s"
+    )
+    return 0
+
+
 def serve_main(args: argparse.Namespace) -> int:
     settings = load_settings(args)
     installers: list[installer_mod.Installer] = []
@@ -160,6 +190,12 @@ def main() -> None:
     if args.command == "dump":
         sys.stdout.write(dump_toml())
         return
+    if args.command == "status":
+        try:
+            code = anyio.run(status_main, args)
+        except KeyboardInterrupt:
+            return
+        sys.exit(code)
     if args.command == "cache":
         try:
             code = anyio.run(cache_main, args)

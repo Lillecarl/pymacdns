@@ -287,6 +287,29 @@ def _run_watcher(
             out.put(snap)
 
 
+def snapshot_once(timeout: float, self_hosts: set[str], config_path: str) -> Snapshot:
+    """One discovery pass: the same inputs the watcher merges every tick.
+
+    Unlike the watcher, failures propagate: a status command wants the
+    error, not last-good state.
+    """
+    from pymacdns.config import load_config
+
+    system = _read_system(self_hosts)
+    files = _read_files(self_hosts)
+    config = load_config(Path(config_path))
+    toml_rules = [
+        Candidate(
+            domain=rule.domain,
+            nameservers=rule.nameservers,
+            priority=rule.priority,
+            source_rank=TOML_RANK,
+        )
+        for rule in config.resolver
+    ]
+    return merge_to_snapshot(system + files + toml_rules, timeout)
+
+
 async def watch(
     timeout: float, self_hosts: set[str], config_path: str
 ) -> AsyncIterator[Snapshot]:

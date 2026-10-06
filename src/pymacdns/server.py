@@ -7,6 +7,7 @@ import anyio
 
 from pymacdns import resolver as resolver_mod
 from pymacdns import store as store_mod
+from pymacdns.config import DEFAULT_CONFIG_PATH
 
 DEFAULT_HOST: Final = "127.0.0.1"
 DEFAULT_PORT: Final = 53
@@ -86,8 +87,10 @@ async def serve_tcp(host: str, port: int, state: DnsState) -> None:
     await listener.serve(lambda stream: _tcp_connection(stream, state))
 
 
-async def refresh_loop(state: DnsState, self_hosts: set[str], timeout: float) -> None:
-    async for snap in store_mod.watch(timeout, self_hosts):
+async def refresh_loop(
+    state: DnsState, self_hosts: set[str], timeout: float, config_path: str
+) -> None:
+    async for snap in store_mod.watch(timeout, self_hosts, config_path):
         state.replace(snap)
 
 
@@ -113,12 +116,13 @@ async def run(
     timeout: float = resolver_mod.DEFAULT_TIMEOUT,
     interval: float = DEFAULT_INTERVAL,
     manage_resolv_conf: bool = True,
+    config_path: str = DEFAULT_CONFIG_PATH,
 ) -> None:
     state = DnsState()
     self_hosts = {"127.0.0.1", "::1", host}
     async with anyio.create_task_group() as tg:
         tg.start_soon(serve_udp, host, port, state)
         tg.start_soon(serve_tcp, host, port, state)
-        tg.start_soon(refresh_loop, state, self_hosts, timeout)
+        tg.start_soon(refresh_loop, state, self_hosts, timeout, config_path)
         if manage_resolv_conf:
             tg.start_soon(hijack_loop, RESOLV_CONF, host, interval)

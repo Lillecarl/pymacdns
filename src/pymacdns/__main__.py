@@ -6,15 +6,16 @@ import sys
 import anyio
 
 from pymacdns import server as server_mod
-from pymacdns.resolver import DEFAULT_TIMEOUT
+from pymacdns.config import DEFAULT_CONFIG_PATH, load_config
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pymacdns")
-    parser.add_argument("--host", default=server_mod.DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=server_mod.DEFAULT_PORT)
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
-    parser.add_argument("--interval", type=float, default=server_mod.DEFAULT_INTERVAL)
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--timeout", type=float, default=None)
+    parser.add_argument("--interval", type=float, default=None)
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     parser.add_argument(
         "--no-resolv-conf",
         action="store_true",
@@ -24,12 +25,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def async_main(args: argparse.Namespace) -> None:
+    try:
+        file_config = load_config(args.config)
+    except ValueError as exc:
+        print(f"pymacdns: bad config {args.config}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
     await server_mod.run(
-        host=args.host,
-        port=args.port,
-        timeout=args.timeout,
-        interval=args.interval,
+        host=args.host or file_config.global_.host,
+        port=args.port or file_config.global_.port,
+        timeout=args.timeout or file_config.global_.timeout,
+        interval=args.interval or file_config.global_.interval,
         manage_resolv_conf=not args.no_resolv_conf,
+        config_path=args.config,
     )
 
 

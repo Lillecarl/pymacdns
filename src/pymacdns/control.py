@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Final
 
@@ -42,6 +43,8 @@ def dispatch(
     op = request.get("op")
     if op == "list":
         return {"entries": cache.describe()}
+    if op == "pid":
+        return {"pid": os.getpid()}
     if op == "clear":
         return {"cleared": cache.clear()}
     if op == "remove":

@@ -6,10 +6,12 @@ import sys
 import anyio
 from pydantic import ValidationError
 
+from pymacdns import installer as installer_mod
 from pymacdns import server as server_mod
 from pymacdns.config import DEFAULT_CONFIG_PATH, DaemonSettings, parse_listen
 from pymacdns.control import control_request
 from pymacdns.store import dump_toml
+from pymacdns.supervise import run_supervised
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--socket",
         default=None,
         help="control socket path (overrides config file)",
+    )
+    parser.add_argument(
+        "--marker-file",
+        default=None,
+        help="maintain this file while running (overrides config file)",
     )
     parser.add_argument(
         "--no-resolv-conf",
@@ -66,6 +73,8 @@ def load_settings(args: argparse.Namespace) -> DaemonSettings:
         updates["interval"] = args.interval
     if args.socket is not None:
         updates["control_socket"] = args.socket
+    if args.marker_file is not None:
+        updates["marker_file"] = args.marker_file
     if updates:
         settings = settings.model_copy(
             update={"server": settings.server.model_copy(update=updates)}
@@ -112,17 +121,26 @@ async def cache_main(args: argparse.Namespace) -> int:
     return 0
 
 
-async def async_main(args: argparse.Namespace) -> None:
+def serve_main(args: argparse.Namespace) -> int:
     settings = load_settings(args)
-    try:
+    installers: list[installer_mod.Installer] = []
+    if settings.server.marker_file is not None:
+        installers.append(
+            installer_mod.FileMarker(path=settings.server.marker_file)
+        )
+
+    async def child_main() -> None:
         await server_mod.run(
             settings,
             config_path=args.config,
             manage_resolv_conf=not args.no_resolv_conf,
         )
+
+    try:
+        return run_supervised(installers, child_main)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
-        raise SystemExit(1) from exc
+        return 1
 
 
 def main() -> None:
@@ -136,10 +154,12 @@ def main() -> None:
         except KeyboardInterrupt:
             return
         sys.exit(code)
+    # Forks here, before any thread or event loop exists.
     try:
-        anyio.run(async_main, args)
+        code = serve_main(args)
     except KeyboardInterrupt:
-        pass
+        return
+    sys.exit(code)
 
 
 def main_sync() -> None:

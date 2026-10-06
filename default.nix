@@ -20,6 +20,7 @@ in
         ps.pydantic
         ps.pydantic-settings
         ps.pytest
+        ps.trustme
         pyobjc-framework-SystemConfiguration
       ]))
       pkgs.ruff

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import ssl
 from dataclasses import dataclass
 from typing import Final
 
@@ -134,7 +135,38 @@ async def forward_tcp(wire: bytes, host: str, port: int, timeout: float) -> byte
             return data
 
 
-def _split_hostport(nameserver: str) -> tuple[str, int]:
+async def forward_tls(
+    wire: bytes,
+    host: str,
+    port: int,
+    timeout: float,
+    ssl_context: ssl.SSLContext | None = None,
+) -> bytes:
+    """DNS-over-TLS: length-prefixed query over a verified TLS stream.
+
+    The host doubles as the TLS name: SNI is always sent (some servers
+    fail without it) and the certificate must cover it. Quad9's covers
+    its names and its anycast IPs alike, so tls://9.9.9.9 verifies with
+    no bootstrap lookup.
+    """
+    with anyio.fail_after(timeout):
+        stream = await anyio.connect_tcp(
+            host, port, tls=True, tls_hostname=host, ssl_context=ssl_context
+        )
+        async with stream:
+            prefix = len(wire).to_bytes(2, "big")
+            await stream.send(prefix + wire)
+            header = await stream.receive(2)
+            while len(header) < 2:
+                header += await stream.receive(2 - len(header))
+            length = int.from_bytes(header, "big")
+            data = b""
+            while len(data) < length:
+                data += await stream.receive(length - len(data))
+            return data
+
+
+def _split_hostport(nameserver: str, default_port: int = 53) -> tuple[str, int]:
     """Split 'host', 'host:port', or '[v6]:port'.
 
     Bare IPs (v4 or v6, including scoped v6 like fe80::1%en0) are
@@ -144,28 +176,53 @@ def _split_hostport(nameserver: str) -> tuple[str, int]:
     if ns.startswith("["):
         host, _, rest = ns[1:].partition("]")
         port = rest.lstrip(":")
-        return host, int(port) if port.isdigit() else 53
+        return host, int(port) if port.isdigit() else default_port
     try:
         ipaddress.ip_address(ns)
-        return ns, 53
+        return ns, default_port
     except ValueError:
         pass
     host, sep, port = ns.rpartition(":")
     if sep and port.isdigit():
         return host, int(port)
-    return ns, 53
+    return ns, default_port
+
+
+def _split_target(nameserver: str) -> tuple[str, str, int]:
+    """Split '[scheme://]host[:port]' into (scheme, host, port).
+
+    Only plain DNS and tls:// exist; anything else raises instead of
+    silently downgrading to cleartext.
+    """
+    text = nameserver.strip()
+    scheme, sep, rest = text.partition("://")
+    if not sep:
+        scheme, rest = "", text
+    if scheme not in ("", "tls"):
+        raise ValueError(f"unknown upstream scheme in {nameserver!r}")
+    host, port = _split_hostport(rest, 853 if scheme == "tls" else 53)
+    return scheme, host, port
 
 
 async def lookup(
     wire: bytes,
     upstream: Upstream,
     use_tcp: bool = False,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> bytes:
     """Forward to upstreams in order, return the first success."""
     last_error: Exception | None = None
     for nameserver in upstream.nameservers:
-        host, port = _split_hostport(nameserver)
         try:
+            scheme, host, port = _split_target(nameserver)
+        except ValueError as exc:
+            last_error = exc
+            continue
+        try:
+            if scheme == "tls":
+                return await forward_tls(
+                    wire, host, port, upstream.timeout, ssl_context
+                )
             if use_tcp:
                 return await forward_tcp(wire, host, port, upstream.timeout)
             return await forward_udp(wire, host, port, upstream.timeout)

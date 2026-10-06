@@ -40,6 +40,13 @@ interval = 1.0
 # nameservers = ["9.9.9.9"]
 # priority = -100
 
+# Quad9 over TLS as the default instead: tls:// takes an optional port
+# (default 853), verifies against the host, and never falls back to
+# cleartext. Quad9's certificate covers its IPs, so no bootstrap.
+# [[resolver]]
+# nameservers = ["tls://9.9.9.9", "tls://149.112.112.112"]
+# priority = -100
+
 # Pin a domain to specific servers, beating /etc/resolver entries and
 # VPN-pushed resolvers for the same domain.
 # [[resolver]]

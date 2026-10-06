@@ -171,6 +171,11 @@ in
             "${configFile}"
           ]
           ++ cfg.extraArgs;
+        # The store Python verifies TLS against this bundle: the
+        # launchd environment carries no SSL_CERT_FILE of its own, and
+        # without it every tls:// upstream fails closed at handshake.
+        EnvironmentVariables.SSL_CERT_FILE =
+          "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         RunAtLoad = true;
         # The supervisor inside already reaps either side on SIGKILL; this
         # only restarts a daemon that exited on its own.

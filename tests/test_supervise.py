@@ -15,6 +15,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from pymacdns import installer as installer_mod
 from pymacdns.control import control_request
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -65,12 +66,13 @@ def port_free(port: int) -> bool:
         sock.close()
 
 
-async def spawn(marker: Path, tag: str, port: int):
+async def spawn(marker: Path, tag: str, port: int, wait: bool = True):
     control_sock = f"/tmp/pmdns-{os.getpid()}-{tag}.sock"
     proc = await anyio.open_process(
         base_args(marker, control_sock, port), cwd=ROOT, env=proc_env()
     )
-    await wait_for(marker)
+    if wait:
+        await wait_for(marker)
     return proc, control_sock
 
 
@@ -122,5 +124,38 @@ async def test_sigterm_cleans_up(tmp_path):
             proc.terminate()
             await proc.wait()
             await wait_gone(marker)
+    finally:
+        await reap(proc)
+
+
+def test_install_partial_rolls_back(tmp_path):
+    """A failing installer leaves exactly its predecessors installed."""
+    good = installer_mod.FileMarker(str(tmp_path / "good"))
+
+    class Boom:
+        def install(self) -> None:
+            raise RuntimeError("boom")
+
+        def cleanup(self) -> None:
+            pass
+
+    done: list = []
+    with pytest.raises(RuntimeError, match="boom"):
+        installer_mod.install_all([good, Boom()], done)
+    assert done == [good]
+    assert (tmp_path / "good").exists()
+    installer_mod.cleanup_all(done)
+    assert not (tmp_path / "good").exists()
+
+
+@pytest.mark.anyio
+async def test_failed_install_exits_nonzero(tmp_path):
+    """Uninstallable config exits nonzero with nothing left behind."""
+    marker = tmp_path / "no-such-dir" / "installed"
+    proc, _ = await spawn(marker, "fi", 15524, wait=False)
+    try:
+        with anyio.fail_after(60):
+            code = await proc.wait()
+            assert code != 0
     finally:
         await reap(proc)

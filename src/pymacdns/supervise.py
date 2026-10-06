@@ -17,16 +17,16 @@ def run_supervised(
     """Fork early into supervisor and server, return the exit code.
 
     Must be called before any thread or event loop exists: fork only
-    preserves the calling thread. The parent installs, forks, then
-    reaps the child with waitpid (which fires on any death including
-    SIGKILL). The child serves and watches the pipe: EOF means the
-    parent died. Whoever survives a death cleans up; cleanup is
-    idempotent so double-clean is safe.
+    preserves the calling thread. The fork comes first so partial
+    installation always has an owner: the child installs with tracked
+    rollback, and the parent cleans the full list as a backstop when
+    the child dies at any point, including mid-install or by SIGKILL.
+    The child watches the pipe (EOF means the parent died) and shuts
+    itself down. Cleanup is idempotent so double-clean is safe.
     """
     parent_end, child_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     parent_end.set_inheritable(True)
     child_end.set_inheritable(True)
-    installer_mod.install_all(installers)
     pid = os.fork()
     if pid > 0:
         child_end.close()
@@ -73,13 +73,17 @@ async def _child(
     installers: list[installer_mod.Installer],
     child_main: Callable[[], Awaitable[None]],
 ) -> None:
+    installed: list[installer_mod.Installer] = []
     try:
         async with anyio.create_task_group() as tg:
-            tg.start_soon(child_main)
             tg.start_soon(watch_parent, pipe_fd, tg.cancel_scope)
             tg.start_soon(_watch_signals, tg.cancel_scope)
+            await anyio.to_thread.run_sync(
+                installer_mod.install_all, installers, installed
+            )
+            tg.start_soon(child_main)
     finally:
-        installer_mod.cleanup_all(installers)
+        installer_mod.cleanup_all(installed)
         try:
             os.close(pipe_fd)
         except OSError:

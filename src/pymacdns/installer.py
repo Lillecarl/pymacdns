@@ -38,9 +38,17 @@ class FileMarker:
             pass
 
 
-def install_all(items: list[Installer]) -> None:
+def install_all(items: list[Installer], done: list[Installer]) -> None:
+    """Install in order, appending successes to done.
+
+    Raises on first failure, leaving exactly the installed subset in
+    done so the caller can roll back partial success. Cleanup of
+    never-installed items must still be safe: the supervisor cleans
+    the full list as a backstop.
+    """
     for item in items:
         item.install()
+        done.append(item)
 
 
 def cleanup_all(items: list[Installer]) -> None:

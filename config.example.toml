@@ -47,6 +47,12 @@ interval = 1.0
 # nameservers = ["tls://9.9.9.9", "tls://149.112.112.112"]
 # priority = -100
 
+# Or over HTTPS: https:// takes an optional port (default 443) and path
+# (default /dns-query). Order in this list is the priority.
+# [[resolver]]
+# nameservers = ["https://9.9.9.9/dns-query", "tls://9.9.9.9"]
+# priority = -100
+
 # Pin a domain to specific servers, beating /etc/resolver entries and
 # VPN-pushed resolvers for the same domain.
 # [[resolver]]

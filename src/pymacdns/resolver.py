@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Final
 
 import anyio
+import dns.asyncquery
 import dns.message
 import dns.rcode
 import dns.rdataclass
@@ -188,20 +189,58 @@ def _split_hostport(nameserver: str, default_port: int = 53) -> tuple[str, int]:
     return ns, default_port
 
 
-def _split_target(nameserver: str) -> tuple[str, str, int]:
-    """Split '[scheme://]host[:port]' into (scheme, host, port).
+def _split_target(nameserver: str) -> tuple[str, str, int, str]:
+    """Split '[scheme://]host[:port][/path]' into (scheme, host, port, path).
 
-    Only plain DNS and tls:// exist; anything else raises instead of
+    Only plain DNS, tls:// (default 853) and https:// (default 443,
+    default path /dns-query) exist; anything else raises instead of
     silently downgrading to cleartext.
     """
     text = nameserver.strip()
     scheme, sep, rest = text.partition("://")
     if not sep:
         scheme, rest = "", text
-    if scheme not in ("", "tls"):
+    if scheme not in ("", "tls", "https"):
         raise ValueError(f"unknown upstream scheme in {nameserver!r}")
-    host, port = _split_hostport(rest, 853 if scheme == "tls" else 53)
-    return scheme, host, port
+    authority, slash, raw_path = rest.partition("/")
+    if scheme == "tls":
+        default_port = 853
+    elif scheme == "https":
+        default_port = 443
+    else:
+        default_port = 53
+    host, port = _split_hostport(authority, default_port)
+    path = "/" + raw_path if slash else ("/dns-query" if scheme == "https" else "")
+    return scheme, host, port, path
+
+
+async def forward_doh(
+    wire: bytes,
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    ssl_context: ssl.SSLContext | None = None,
+) -> bytes:
+    """DNS-over-HTTPS via dnspython: POST of the wire query, verified.
+
+    An IP host verifies against its SANs with no bootstrap lookup;
+    a name resolves through the system (so /etc/hosts works). A custom
+    context slots into dnspython's verify; otherwise its default (the
+    certifi bundle) applies.
+    """
+    query = dns.message.from_wire(wire)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    url = f"https://{host}:{port}{path or '/dns-query'}"
+    response = await dns.asyncquery.https(
+        query,
+        url,
+        timeout=timeout,
+        post=True,
+        verify=ssl_context if ssl_context is not None else True,
+    )
+    return response.to_wire()
 
 
 async def lookup(
@@ -210,25 +249,27 @@ async def lookup(
     use_tcp: bool = False,
     ssl_context: ssl.SSLContext | None = None,
 ) -> bytes:
-    """Forward to upstreams in order, return the first success.
+    """Forward to upstreams in listed order, return the first success.
 
-    Encrypted transports go before plaintext regardless of list order;
-    relative order holds within each class. Unknown schemes are
-    skipped, never downgraded.
+    Priority lives in the configuration, not here: whoever lists the
+    nameservers decides the order, encrypted or otherwise. Unknown
+    schemes are skipped, never downgraded.
     """
     last_error: Exception | None = None
-    targets = []
     for nameserver in upstream.nameservers:
         try:
-            targets.append(_split_target(nameserver))
+            scheme, host, port, path = _split_target(nameserver)
         except ValueError as exc:
             last_error = exc
-    targets.sort(key=lambda target: target[0] == "")
-    for scheme, host, port in targets:
+            continue
         try:
             if scheme == "tls":
                 return await forward_tls(
                     wire, host, port, upstream.timeout, ssl_context
+                )
+            if scheme == "https":
+                return await forward_doh(
+                    wire, host, port, path, upstream.timeout, ssl_context
                 )
             if use_tcp:
                 return await forward_tcp(wire, host, port, upstream.timeout)

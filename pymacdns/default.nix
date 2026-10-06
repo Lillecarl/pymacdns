@@ -11,5 +11,6 @@ buildPythonPackage {
   meta = {
     description = "macOS DNS forwarder respecting DHCP upstreams";
     license = lib.licenses.mit;
+    mainProgram = "pymacdns";
   };
 }

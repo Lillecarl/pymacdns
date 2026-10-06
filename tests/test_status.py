@@ -32,8 +32,9 @@ def test_column_labels_prefix_repeats():
         status_mod.Probe("example.com.", "AAAA"),
     )
     assert status_mod.column_labels(probes) == ["A", "AAAA"]
-    assert status_mod.column_labels(status_mod.PROBES)[-2:] == [
+    assert status_mod.column_labels(status_mod.PROBES)[-3:] == [
         "ipv6:AAAA",
+        "sigok:A",
         "dnssec-failed:A",
     ]
 

@@ -2,8 +2,10 @@
 
 DNSSEC is exercised, not implemented: the daemon forwards the DO bit
 untouched and never validates, so validation is the upstream's job.
-The dnssec-failed.org probe proves it: a validating upstream (Quad9)
-SERVFAILs its bogus signature, and that answer passes straight through.
+The last two probes are the control pair: sigok is correctly signed
+and must answer NOERROR, dnssec-failed.org is bogus on purpose and a
+validating upstream (Quad9) must SERVFAIL it. Both verdicts pass
+straight through.
 """
 
 from __future__ import annotations
@@ -56,8 +58,8 @@ class Row:
     outcomes: dict[Probe, Outcome] = field(default_factory=dict)
 
 
-# example.com covers the common types against one zone; the last two
-# are diagnostics: a AAAA-only name and a name whose signature is
+# example.com covers the common types against one zone; ipv6.google
+# is AAAA-only; the last two are the DNSSEC control pair, valid and
 # bogus on purpose.
 PROBES: tuple[Probe, ...] = (
     Probe("example.com.", "A"),
@@ -68,6 +70,7 @@ PROBES: tuple[Probe, ...] = (
     Probe("example.com.", "NS"),
     Probe("example.com.", "DNSKEY"),
     Probe("ipv6.google.com.", "AAAA"),
+    Probe("sigok.verteiltesysteme.net.", "A"),
     Probe("dnssec-failed.org.", "A"),
 )
 

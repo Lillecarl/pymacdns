@@ -95,16 +95,8 @@ def describe_targets(snap: store_mod.Snapshot) -> list[Target]:
 
 
 def column_labels(probes: tuple[Probe, ...] = PROBES) -> list[str]:
-    """Header labels: types, prefixed where a type repeats across names."""
-    seen: set[str] = set()
-    labels = []
-    for probe in probes:
-        if probe.qtype in seen:
-            labels.append(f"{probe.name.split('.')[0]}:{probe.qtype}")
-        else:
-            labels.append(probe.qtype)
-            seen.add(probe.qtype)
-    return labels
+    """Header labels: every column names the probe it runs."""
+    return [f"{probe.name.split('.')[0]}:{probe.qtype}" for probe in probes]
 
 
 async def probe_one(

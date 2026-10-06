@@ -26,12 +26,13 @@ def test_describe_targets_dedups_and_orders():
     ]
 
 
-def test_column_labels_prefix_repeats():
-    probes = (
-        status_mod.Probe("example.com.", "A"),
-        status_mod.Probe("example.com.", "AAAA"),
-    )
-    assert status_mod.column_labels(probes) == ["A", "AAAA"]
+def test_column_labels_name_every_probe():
+    assert status_mod.column_labels(
+        (
+            status_mod.Probe("example.com.", "A"),
+            status_mod.Probe("example.com.", "AAAA"),
+        )
+    ) == ["example:A", "example:AAAA"]
     assert status_mod.column_labels(status_mod.PROBES)[-3:] == [
         "ipv6:AAAA",
         "sigok:A",
@@ -58,7 +59,7 @@ def test_render_aligns_cells():
         ),
     ]
     lines = status_mod.render(rows, probes).splitlines()
-    assert lines[0].split() == ["UPSTREAM", "SCOPE", "A", "AAAA"]
+    assert lines[0].split() == ["UPSTREAM", "SCOPE", "example:A", "example:AAAA"]
     assert "41ms" in lines[1] and "SERVFAIL" in lines[1]
     assert "timeout" in lines[2] and lines[2].rstrip().endswith("-")
     padded = "9.9.9.9".ljust(len("tls://9.9.9.9"))

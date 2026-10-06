@@ -210,14 +210,21 @@ async def lookup(
     use_tcp: bool = False,
     ssl_context: ssl.SSLContext | None = None,
 ) -> bytes:
-    """Forward to upstreams in order, return the first success."""
+    """Forward to upstreams in order, return the first success.
+
+    Encrypted transports go before plaintext regardless of list order;
+    relative order holds within each class. Unknown schemes are
+    skipped, never downgraded.
+    """
     last_error: Exception | None = None
+    targets = []
     for nameserver in upstream.nameservers:
         try:
-            scheme, host, port = _split_target(nameserver)
+            targets.append(_split_target(nameserver))
         except ValueError as exc:
             last_error = exc
-            continue
+    targets.sort(key=lambda target: target[0] == "")
+    for scheme, host, port in targets:
         try:
             if scheme == "tls":
                 return await forward_tls(

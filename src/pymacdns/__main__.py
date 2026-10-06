@@ -7,6 +7,7 @@ import anyio
 from pydantic import ValidationError
 
 from pymacdns import installer as installer_mod
+from pymacdns import latency as latency_mod
 from pymacdns import server as server_mod
 from pymacdns import status as status_mod
 from pymacdns import store as store_mod
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "status", help="probe effective upstreams across names and types"
     )
+    sub.add_parser("latency", help="show in-memory upstream latency buckets")
     cache_parser = sub.add_parser("cache", help="inspect the daemon cache")
     cache_sub = cache_parser.add_subparsers(dest="cache_op", required=True)
     cache_sub.add_parser("list", help="list cached entries")
@@ -135,6 +137,24 @@ async def cache_main(args: argparse.Namespace) -> int:
     return 0
 
 
+async def latency_main(args: argparse.Namespace) -> int:
+    path = socket_path(args)
+    try:
+        reply = await control_request(path, {"op": "latency"})
+    except OSError as exc:
+        print(f"pymacdns: cannot reach daemon at {path}: {exc}", file=sys.stderr)
+        return 1
+    if "error" in reply:
+        print(f"pymacdns: {reply['error']}", file=sys.stderr)
+        return 1
+    summary = reply.get("latency", {})
+    if not summary:
+        print("pymacdns: no observations yet")
+        return 0
+    print(latency_mod.format_table(summary))
+    return 0
+
+
 async def status_main(args: argparse.Namespace) -> int:
     settings = load_settings(args)
     self_hosts = {host for host, _ in settings.server.listen}
@@ -193,6 +213,12 @@ def main() -> None:
     if args.command == "status":
         try:
             code = anyio.run(status_main, args)
+        except KeyboardInterrupt:
+            return
+        sys.exit(code)
+    if args.command == "latency":
+        try:
+            code = anyio.run(latency_main, args)
         except KeyboardInterrupt:
             return
         sys.exit(code)

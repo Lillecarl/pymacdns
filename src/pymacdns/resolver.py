@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import ssl
+import time
 from dataclasses import dataclass
 from typing import Final
 
@@ -13,6 +14,8 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
 import httpx
+
+from pymacdns import latency as latency_mod
 
 DEFAULT_TIMEOUT: Final = 2.0
 
@@ -249,12 +252,15 @@ async def lookup(
     use_tcp: bool = False,
     ssl_context: ssl.SSLContext | None = None,
     doh_client: httpx.AsyncClient | None = None,
+    stats: latency_mod.LatencyStats | None = None,
 ) -> bytes:
     """Forward to upstreams in listed order, return the first success.
 
     Priority lives in the configuration, not here: whoever lists the
     nameservers decides the order, encrypted or otherwise. Unknown
-    schemes are skipped, never downgraded.
+    schemes are skipped, never downgraded. With stats, every attempt
+    is recorded under its listed nameserver: latency on success,
+    an error count otherwise.
     """
     last_error: Exception | None = None
     for nameserver in upstream.nameservers:
@@ -263,13 +269,14 @@ async def lookup(
         except ValueError as exc:
             last_error = exc
             continue
+        start = time.monotonic()
         try:
             if scheme == "tls":
-                return await forward_tls(
+                reply = await forward_tls(
                     wire, host, port, upstream.timeout, ssl_context
                 )
-            if scheme == "https":
-                return await forward_doh(
+            elif scheme == "https":
+                reply = await forward_doh(
                     wire,
                     host,
                     port,
@@ -278,10 +285,16 @@ async def lookup(
                     doh_client,
                     ssl_context,
                 )
-            if use_tcp:
-                return await forward_tcp(wire, host, port, upstream.timeout)
-            return await forward_udp(wire, host, port, upstream.timeout)
+            elif use_tcp:
+                reply = await forward_tcp(wire, host, port, upstream.timeout)
+            else:
+                reply = await forward_udp(wire, host, port, upstream.timeout)
+            if stats is not None:
+                stats.record_ok(nameserver, time.monotonic() - start)
+            return reply
         except Exception as exc:  # noqa: BLE001 - try next upstream
+            if stats is not None:
+                stats.record_err(nameserver)
             last_error = exc
             continue
     if last_error is not None:

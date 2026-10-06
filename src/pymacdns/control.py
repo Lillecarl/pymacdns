@@ -10,12 +10,15 @@ import anyio
 import dns.rdatatype
 
 from pymacdns import cache as cache_mod
+from pymacdns import latency as latency_mod
 
 MAX_REQUEST_BYTES: Final = 65536
 
 
 async def handle_connection(
-    stream: anyio.abc.SocketStream, cache: cache_mod.DnsCache
+    stream: anyio.abc.SocketStream,
+    cache: cache_mod.DnsCache,
+    stats: latency_mod.LatencyStats | None = None,
 ) -> None:
     async with stream:
         data = b""
@@ -32,12 +35,14 @@ async def handle_connection(
         except (ValueError, UnicodeDecodeError):
             await stream.send(b'{"error": "bad request"}\n')
             return
-        payload = (json.dumps(dispatch(cache, request)) + "\n").encode()
+        payload = (json.dumps(dispatch(cache, request, stats)) + "\n").encode()
         await stream.send(payload)
 
 
 def dispatch(
-    cache: cache_mod.DnsCache, request: object
+    cache: cache_mod.DnsCache,
+    request: object,
+    stats: latency_mod.LatencyStats | None = None,
 ) -> dict[str, object]:
     if not isinstance(request, dict):
         return {"error": "bad request"}
@@ -46,6 +51,8 @@ def dispatch(
         return {"entries": cache.describe()}
     if op == "pid":
         return {"pid": os.getpid()}
+    if op == "latency":
+        return {"latency": stats.summary() if stats is not None else {}}
     if op == "clear":
         return {"cleared": cache.clear()}
     if op == "remove":
@@ -66,7 +73,10 @@ def dispatch(
 
 
 async def serve_control(
-    path: str, cache: cache_mod.DnsCache, group: str | None = None
+    path: str,
+    cache: cache_mod.DnsCache,
+    group: str | None = None,
+    stats: latency_mod.LatencyStats | None = None,
 ) -> None:
     """Serve the control socket, optionally opening it to a group.
 
@@ -87,7 +97,7 @@ async def serve_control(
         target.chmod(0o770 if group is not None else 0o600)
     except OSError:
         pass
-    await listener.serve(lambda stream: handle_connection(stream, cache))
+    await listener.serve(lambda stream: handle_connection(stream, cache, stats))
 
 
 async def control_request(path: str, payload: dict[str, object]) -> dict[str, object]:

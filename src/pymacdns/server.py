@@ -13,6 +13,7 @@ import httpx
 
 from pymacdns import cache as cache_mod
 from pymacdns import control as control_mod
+from pymacdns import latency as latency_mod
 from pymacdns import resolver as resolver_mod
 from pymacdns import routes as routes_mod
 from pymacdns import store as store_mod
@@ -27,6 +28,9 @@ class DnsState:
     route_filter: routes_mod.RouteFilter = routes_mod.RouteFilter.OFF
     cache: cache_mod.DnsCache = field(default_factory=cache_mod.DnsCache)
     doh_client: httpx.AsyncClient | None = None
+    latency: latency_mod.LatencyStats = field(
+        default_factory=latency_mod.LatencyStats
+    )
 
     def pick(self, qname: str) -> resolver_mod.Upstream | None:
         return resolver_mod.pick_upstream(qname, self.domains, self.standard)
@@ -69,7 +73,11 @@ async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
         if upstream is None:
             raise ValueError("no upstream")
         reply = await resolver_mod.lookup(
-            wire, upstream, use_tcp=use_tcp, doh_client=state.doh_client
+            wire,
+            upstream,
+            use_tcp=use_tcp,
+            doh_client=state.doh_client,
+            stats=state.latency,
         )
         if dns.message.from_wire(reply).rcode() not in (
             dns.rcode.NOERROR,
@@ -203,14 +211,18 @@ async def run(
                 settings.server.control_socket,
                 state.cache,
                 settings.server.control_socket_group,
+                state.latency,
             )
 
 
 async def serve_control_guarded(
-    path: str, cache: cache_mod.DnsCache, group: str | None
+    path: str,
+    cache: cache_mod.DnsCache,
+    group: str | None,
+    stats: latency_mod.LatencyStats | None,
 ) -> None:
     try:
-        await control_mod.serve_control(path, cache, group)
+        await control_mod.serve_control(path, cache, group, stats)
     except OSError as exc:
         print(f"pymacdns: control socket {path}: {exc}", file=sys.stderr)
 

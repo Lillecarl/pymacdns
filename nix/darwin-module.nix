@@ -158,7 +158,19 @@ in
       serviceConfig = {
         # ProgramArguments and not `command`: no shell quoting between the
         # option values and the daemon's argv.
-        ProgramArguments = [ (lib.getExe cfg.package) ] ++ cfg.extraArgs;
+        #
+        # --config names the generated file by store path rather than
+        # relying on the /etc default below: the path embeds the config
+        # hash, so any option change alters the plist and launchd
+        # restarts the daemon. Without it a config-only switch leaves
+        # the old process (and its startup-time settings) running.
+        ProgramArguments =
+          [
+            (lib.getExe cfg.package)
+            "--config"
+            "${configFile}"
+          ]
+          ++ cfg.extraArgs;
         RunAtLoad = true;
         # The supervisor inside already reaps either side on SIGKILL; this
         # only restarts a daemon that exited on its own.

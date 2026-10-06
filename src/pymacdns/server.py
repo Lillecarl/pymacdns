@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import errno
+import ipaddress
+import sys
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -7,11 +11,8 @@ import anyio
 
 from pymacdns import resolver as resolver_mod
 from pymacdns import store as store_mod
-from pymacdns.config import DEFAULT_CONFIG_PATH
+from pymacdns.config import DEFAULT_CONFIG_PATH, DaemonSettings
 
-DEFAULT_HOST: Final = "127.0.0.1"
-DEFAULT_PORT: Final = 53
-DEFAULT_INTERVAL: Final = 1.0
 RESOLV_CONF: Final = "/etc/resolv.conf"
 
 
@@ -42,8 +43,9 @@ async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
         return resolver_mod.servfail(wire)
 
 
-async def serve_udp(host: str, port: int, state: DnsState) -> None:
-    sock = await anyio.create_udp_socket(local_host=host, local_port=port)
+async def serve_udp_sock(
+    sock: anyio.abc.UDPSocket, state: DnsState
+) -> None:
     async with sock, anyio.create_task_group() as tg:
         while True:
             data, addr = await sock.receive()
@@ -82,8 +84,9 @@ async def _tcp_connection(stream: anyio.abc.SocketStream, state: DnsState) -> No
             await stream.send(len(reply).to_bytes(2, "big") + reply)
 
 
-async def serve_tcp(host: str, port: int, state: DnsState) -> None:
-    listener = await anyio.create_tcp_listener(local_host=host, local_port=port)
+async def serve_tcp_listener(
+    listener: anyio.abc.MultiListener[anyio.abc.SocketStream], state: DnsState
+) -> None:
     await listener.serve(lambda stream: _tcp_connection(stream, state))
 
 
@@ -94,8 +97,8 @@ async def refresh_loop(
         state.replace(snap)
 
 
-async def hijack_loop(path: str, host: str, interval: float) -> None:
-    wanted = f"nameserver {host}\n"
+async def hijack_loop(path: str, hosts: list[str], interval: float) -> None:
+    wanted = "".join(f"nameserver {host}\n" for host in hosts)
     target = anyio.Path(path)
     while True:
         try:
@@ -111,18 +114,73 @@ async def hijack_loop(path: str, host: str, interval: float) -> None:
 
 
 async def run(
-    host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
-    timeout: float = resolver_mod.DEFAULT_TIMEOUT,
-    interval: float = DEFAULT_INTERVAL,
-    manage_resolv_conf: bool = True,
+    settings: DaemonSettings,
     config_path: str = DEFAULT_CONFIG_PATH,
+    manage_resolv_conf: bool = True,
 ) -> None:
     state = DnsState()
-    self_hosts = {"127.0.0.1", "::1", host}
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(serve_udp, host, port, state)
-        tg.start_soon(serve_tcp, host, port, state)
-        tg.start_soon(refresh_loop, state, self_hosts, timeout, config_path)
-        if manage_resolv_conf:
-            tg.start_soon(hijack_loop, RESOLV_CONF, host, interval)
+    udp_socks: list[anyio.abc.UDPSocket] = []
+    tcp_listeners: list[anyio.abc.MultiListener[anyio.abc.SocketStream]] = []
+    bound: list[str] = []
+    async with contextlib.AsyncExitStack() as stack:
+        for host, port in settings.server.listen:
+            udp_ok = tcp_ok = False
+            try:
+                sock = await anyio.create_udp_socket(local_host=host, local_port=port)
+            except OSError as exc:
+                print(_bind_hint(host, port, "UDP", exc), file=sys.stderr)
+            else:
+                await stack.enter_async_context(sock)
+                udp_socks.append(sock)
+                udp_ok = True
+            try:
+                listener = await anyio.create_tcp_listener(
+                    local_host=host, local_port=port
+                )
+            except OSError as exc:
+                print(_bind_hint(host, port, "TCP", exc), file=sys.stderr)
+            else:
+                await stack.enter_async_context(listener)
+                tcp_listeners.append(listener)
+                tcp_ok = True
+            if udp_ok or tcp_ok:
+                bound.append(host)
+        if not udp_socks and not tcp_listeners:
+            wanted = ", ".join(
+                f"{host}:{port}" for host, port in settings.server.listen
+            )
+            raise RuntimeError(f"pymacdns: could not bind any of {wanted}")
+        self_hosts = set(bound)
+        async with anyio.create_task_group() as tg:
+            for sock in udp_socks:
+                tg.start_soon(serve_udp_sock, sock, state)
+            for listener in tcp_listeners:
+                tg.start_soon(serve_tcp_listener, listener, state)
+            tg.start_soon(
+                refresh_loop, state, self_hosts, settings.server.timeout, config_path
+            )
+            if manage_resolv_conf and bound:
+                tg.start_soon(
+                    hijack_loop, RESOLV_CONF, bound, settings.server.interval
+                )
+
+
+def _is_aliasable_loopback(host: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_loopback and "." in host and host != "127.0.0.1"
+
+
+def _bind_hint(host: str, port: int, proto: str, exc: OSError) -> str:
+    what = f"pymacdns: {proto} {host}:{port}"
+    if exc.errno == errno.EACCES:
+        return f"{what}: permission denied (ports below 1024 need root)"
+    if exc.errno == errno.EADDRINUSE:
+        return f"{what}: already in use"
+    if exc.errno == errno.EADDRNOTAVAIL and _is_aliasable_loopback(host):
+        return f"{what}: missing loopback alias (sudo ifconfig lo0 alias {host} up)"
+    if exc.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT):
+        return f"{what}: address family unavailable (stack disabled?)"
+    return f"{what}: {exc}"

@@ -1,38 +1,32 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final, Self
+
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+)
+from pydantic_settings import (
+    BaseSettings,
+    SettingsConfigDict,
+    TomlConfigSettingsSource,
+)
 
 from pymacdns.resolver import _split_hostport
 
 DEFAULT_CONFIG_PATH: Final = "/etc/pymacdns/config.toml"
-DEFAULT_HOST: Final = "127.0.0.1"
-DEFAULT_PORT: Final = 53
+DEFAULT_LISTEN: Final = ["127.0.0.53:53", "[::1]:53"]
 DEFAULT_TIMEOUT: Final = 2.0
 DEFAULT_INTERVAL: Final = 1.0
 
-
-@dataclass(frozen=True)
-class ResolverRule:
-    domain: str  # "" is the catch-all, lowercased, no trailing dot
-    nameservers: tuple[str, ...]
-    priority: int = 0
-
-
-@dataclass(frozen=True)
-class GlobalConfig:
-    host: str = DEFAULT_HOST
-    port: int = DEFAULT_PORT
-    timeout: float = DEFAULT_TIMEOUT
-    interval: float = DEFAULT_INTERVAL
-
-
-@dataclass(frozen=True)
-class FileConfig:
-    global_: GlobalConfig = GlobalConfig()
-    resolvers: tuple[ResolverRule, ...] = ()
+_toml_path: ContextVar[str | None] = ContextVar("pymacdns_toml_path", default=None)
 
 
 def normalize_domain(domain: object) -> str:
@@ -41,69 +35,109 @@ def normalize_domain(domain: object) -> str:
     return domain.strip().lower().rstrip(".")
 
 
-def parse_global(data: object) -> GlobalConfig:
-    if data is None:
-        return GlobalConfig()
-    if not isinstance(data, dict):
-        raise ValueError(f"[global] must be a table, got {data!r}")
-    host, port = DEFAULT_HOST, DEFAULT_PORT
-    if "listen" in data:
-        listen = data["listen"]
-        if not isinstance(listen, str):
-            raise ValueError(f"[global] listen must be a string, got {listen!r}")
-        host, port = _split_hostport(listen)
-    timeout = _number(data.get("timeout"), DEFAULT_TIMEOUT, "[global] timeout")
-    interval = _number(data.get("interval"), DEFAULT_INTERVAL, "[global] interval")
-    return GlobalConfig(host=host, port=port, timeout=timeout, interval=interval)
-
-
-def _number(value: object, default: float, what: str) -> float:
-    if value is None:
-        return default
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{what} must be a number, got {value!r}")
-    return float(value)
-
-
-def parse_resolver(data: object) -> ResolverRule:
-    if not isinstance(data, dict):
-        raise ValueError(f"[[resolver]] must be a table, got {data!r}")
-    nameservers = data.get("nameservers")
-    if (
-        not isinstance(nameservers, list)
-        or not nameservers
-        or any(not isinstance(ns, str) for ns in nameservers)
-    ):
+def parse_listen(value: object) -> tuple[tuple[str, int], ...]:
+    """Accept one "host:port" string or a list of them."""
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, list) or not items:
         raise ValueError(
-            "[[resolver]] needs a non-empty nameservers string list, "
-            f"got {nameservers!r}"
+            f"[server] listen must be a string or non-empty list, got {value!r}"
         )
-    priority = data.get("priority", 0)
-    if isinstance(priority, bool) or not isinstance(priority, int):
-        raise ValueError(f"[[resolver]] priority must be an integer, got {priority!r}")
-    return ResolverRule(
-        domain=normalize_domain(data.get("domain", "")),
-        nameservers=tuple(nameservers),
-        priority=priority,
+    parsed = []
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError(f"[server] listen entries must be strings, got {item!r}")
+        parsed.append(_split_hostport(item))
+    return tuple(parsed)
+
+
+ListenAddresses = Annotated[
+    tuple[tuple[str, int], ...], BeforeValidator(parse_listen)
+]
+
+
+def format_listen(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
+
+
+class ResolverRule(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    domain: str = ""
+    nameservers: list[str] = Field(min_length=1)
+    priority: StrictInt = 0
+
+    @field_validator("domain")
+    @classmethod
+    def _normalize_domain(cls, value: str) -> str:
+        return normalize_domain(value)
+
+
+class GlobalConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    listen: ListenAddresses = parse_listen(DEFAULT_LISTEN)
+    timeout: float = DEFAULT_TIMEOUT
+    interval: float = DEFAULT_INTERVAL
+
+
+class FileConfig(BaseModel):
+    """The on-disk TOML schema, also used to validate dump output."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    server: GlobalConfig = Field(default_factory=GlobalConfig)
+    resolver: list[ResolverRule] = Field(default_factory=list)
+
+
+class DaemonSettings(BaseSettings):
+    """Effective settings: CLI init kwargs beat env, env beats TOML file."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="pymacdns_",
+        env_nested_delimiter="__",
+        extra="forbid",
+        populate_by_name=True,
     )
+
+    server: GlobalConfig = Field(default_factory=GlobalConfig)
+    resolver: list[ResolverRule] = Field(default_factory=list)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: object,
+        env_settings: object,
+        dotenv_settings: object,
+        file_secret_settings: object,
+    ) -> tuple[object, ...]:
+        path = _toml_path.get()
+        if path is None:
+            return (init_settings, env_settings)
+        return (
+            init_settings,
+            env_settings,
+            TomlConfigSettingsSource(settings_cls, toml_file=path),
+        )
+
+    @classmethod
+    def load(cls, toml_path: str | Path) -> Self:
+        token = _toml_path.set(str(toml_path))
+        try:
+            return cls()
+        finally:
+            _toml_path.reset(token)
 
 
 def parse_config(text: str) -> FileConfig:
-    """Parse TOML config text. Pure function, raises ValueError on bad input."""
-    data = tomllib.loads(text)
-    if not isinstance(data, dict):
-        raise ValueError("config root must be a table")
-    resolvers = data.get("resolver", [])
-    if not isinstance(resolvers, list):
-        raise ValueError(f"[[resolver]] must be a list, got {resolvers!r}")
-    return FileConfig(
-        global_=parse_global(data.get("global")),
-        resolvers=tuple(parse_resolver(entry) for entry in resolvers),
-    )
+    """Parse TOML config text, raising pydantic.ValidationError on bad input."""
+    return FileConfig.model_validate(tomllib.loads(text))
 
 
 def load_config(path: str | Path) -> FileConfig:
-    """Load config from path; missing file means system-discovered only."""
+    """Load config from path; a missing file means system-discovered only."""
     target = Path(path)
     if not target.is_file():
         return FileConfig()

@@ -10,7 +10,7 @@ from typing import Final
 import anyio
 
 from pymacdns import resolver as resolver_mod
-from pymacdns.config import normalize_domain
+from pymacdns.config import DEFAULT_LISTEN, normalize_domain
 
 GLOBAL_DNS_KEY: Final = "State:/Network/Global/DNS"
 SERVICE_DNS_PATTERN: Final = r"State:/Network/Service/.*/DNS"
@@ -279,8 +279,8 @@ def dump_toml(self_hosts: set[str] | frozenset[str] = DUMP_SELF_HOSTS) -> str:
         '# pymacdns forwards whatever query types it receives; if macOS',
         '# only issues A queries, AAAA answers never happen. That call is',
         "# the system's, not the forwarder's.",
-        '[global]',
-        'listen = "127.0.0.1:53"',
+        '[server]',
+        f"listen = [{', '.join(_toml_str(entry) for entry in DEFAULT_LISTEN)}]",
         "timeout = 2.0",
         "interval = 1.0",
     ]

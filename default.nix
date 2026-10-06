@@ -17,6 +17,8 @@ in
       (pkgs.python3.withPackages (ps: [
         ps.anyio
         ps.dnspython
+        ps.pydantic
+        ps.pydantic-settings
         pyobjc-framework-SystemConfiguration
       ]))
       pkgs.ruff

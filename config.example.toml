@@ -12,8 +12,8 @@
 # forwarder's. Dual-stack answers are normal and harmless: clients race
 # both (Happy Eyeballs) and fall back within a fraction of a second.
 
-[global]
-listen = "127.0.0.1:53"
+[server]
+listen = ["127.0.0.53:53", "[::1]:53"]
 timeout = 2.0
 interval = 1.0
 

@@ -137,7 +137,9 @@ async def test_handle_wire_records_upstream_latency():
         async with anyio.create_task_group() as tg:
             tg.start_soon(answer_plain_udp, udp_sock)
             await anyio.sleep(0.2)
-            out = dns.message.from_wire(await server_mod.handle_wire(wire, state, False))
+            out = dns.message.from_wire(
+                await server_mod.handle_wire(wire, state, False)
+            )
             assert out.rcode() == dns.rcode.NOERROR
             tg.cancel_scope.cancel()
     row = state.latency.summary()[f"127.0.0.1:{port}"]

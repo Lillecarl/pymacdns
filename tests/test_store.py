@@ -7,7 +7,11 @@ MacDNSHelper writes match domains plus search domains with no orders;
 NetBird fans out across several State:/Network/Service/*/DNS keys).
 """
 
+import anyio
+import pytest
+
 from pymacdns import resolver as resolver_mod
+from pymacdns import store as store_mod
 from pymacdns.store import (
     STORE_RANK,
     TOML_RANK,
@@ -148,3 +152,23 @@ def test_no_upstreams_is_none_not_fallback():
     snap = merge_to_snapshot(system_candidates([], [], HOSTS), 2.0)
     assert snap.standard is None
     assert snap.domains == {}
+
+
+@pytest.mark.anyio
+async def test_watch_reads_existing_config_file(tmp_path):
+    """Regression: the watcher crashed on a present config file.
+
+    Every test used a missing config path, so the TOML branch of the
+    watcher ran for the first time as root from launchd.
+    """
+    conf = tmp_path / "pymacdns.toml"
+    conf.write_text(
+        '[[resolver]]\ndomain = "example.com"\n'
+        'nameservers = ["9.9.9.9"]\npriority = -100\n'
+    )
+    with anyio.fail_after(15):
+        async for snap in store_mod.watch(2.0, set(), str(conf)):
+            pinned = snap.domains.get("example.com")
+            assert pinned is not None
+            assert "9.9.9.9" in pinned.nameservers
+            break

@@ -276,7 +276,7 @@ def _run_watcher(
                         priority=rule.priority,
                         source_rank=TOML_RANK,
                     )
-                    for rule in config.resolvers
+                    for rule in config.resolver
                 ]
                 toml_mtime = mtime
             except ValueError:  # noqa: BLE001 - keep last-good config

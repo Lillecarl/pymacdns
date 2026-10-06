@@ -1,14 +1,23 @@
 {
   pkgs ? import <nixpkgs> { },
 }:
+let
+  pyobjc-framework-SystemConfiguration =
+    pkgs.python3Packages.callPackage ./nix/pyobjc-framework-SystemConfiguration { };
+in
 {
-  pymacdns = pkgs.python3Packages.callPackage ./pymacdns { };
+  inherit pyobjc-framework-SystemConfiguration;
+
+  pymacdns = pkgs.python3Packages.callPackage ./pymacdns {
+    inherit pyobjc-framework-SystemConfiguration;
+  };
 
   shell = pkgs.mkShell {
     packages = [
       (pkgs.python3.withPackages (ps: [
         ps.anyio
         ps.dnspython
+        pyobjc-framework-SystemConfiguration
       ]))
       pkgs.ruff
     ];

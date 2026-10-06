@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "anyio>=4.0",
   "dnspython>=2.6",
+  "pyobjc-framework-SystemConfiguration>=11.1; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

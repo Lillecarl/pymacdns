@@ -1,4 +1,4 @@
-{ lib, buildPythonPackage, setuptools, anyio, dnspython }:
+{ lib, buildPythonPackage, setuptools, anyio, dnspython, pyobjc-framework-SystemConfiguration }:
 
 buildPythonPackage {
   pname = "pymacdns";
@@ -6,7 +6,7 @@ buildPythonPackage {
   src = ../.;
   pyproject = true;
   build-system = [ setuptools ];
-  dependencies = [ anyio dnspython ];
+  dependencies = [ anyio dnspython pyobjc-framework-SystemConfiguration ];
   pythonImportsCheck = [ "pymacdns" ];
   meta = {
     description = "macOS DNS forwarder respecting DHCP upstreams";

@@ -269,12 +269,15 @@ FLUSH_COMMANDS: Final = (
 
 
 def daemon_listening(path: str) -> bool:
+    """Whether a daemon answers a pid request on the control socket."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(2)
         try:
             sock.connect(path)
+            sock.sendall(b'{"op": "pid"}\n')
+            return b'"pid"' in sock.recv(4096)
         except OSError:
             return False
-    return True
 
 
 def serve_main(args: argparse.Namespace) -> int:

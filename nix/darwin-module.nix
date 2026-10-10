@@ -157,7 +157,13 @@ in
     launchd.daemons.pymacdns = {
       serviceConfig = {
         # ProgramArguments and not `command`: no shell quoting between the
-        # option values and the daemon's argv.
+        # option values and the daemon's argv. The values reach the
+        # daemon as "$@".
+        #
+        # wait4path, because launchd loads this plist at boot before the
+        # /nix volume is mounted: a bare store path fails to spawn with
+        # exit 78 (EX_CONFIG) and the job then stays in "spawn scheduled"
+        # until a manual kickstart. Measured on macOS 27 after a reboot.
         #
         # --config names the generated file by store path rather than
         # relying on the /etc default below: the path embeds the config
@@ -166,6 +172,10 @@ in
         # the old process (and its startup-time settings) running.
         ProgramArguments =
           [
+            "/bin/sh"
+            "-c"
+            ''/bin/wait4path /nix/store && exec "$@"''
+            "pymacdns"
             (lib.getExe cfg.package)
             "--config"
             "${configFile}"

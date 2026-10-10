@@ -57,6 +57,28 @@ ListenAddresses = Annotated[
 ]
 
 
+def parse_listen_interfaces(value: object) -> tuple[tuple[str, int], ...]:
+    """Accept "pattern:port" strings, an fnmatch glob on interface names."""
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        raise ValueError(
+            f"[server] listen_interfaces must be a string or list, got {value!r}"
+        )
+    parsed = []
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError(
+                f"[server] listen_interfaces entries must be strings, got {item!r}"
+            )
+        parsed.append(_split_hostport(item))
+    return tuple(parsed)
+
+
+InterfaceListen = Annotated[
+    tuple[tuple[str, int], ...], BeforeValidator(parse_listen_interfaces)
+]
+
+
 def format_listen(host: str, port: int) -> str:
     if ":" in host and not host.startswith("["):
         return f"[{host}]:{port}"
@@ -80,6 +102,7 @@ class GlobalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     listen: ListenAddresses = parse_listen(DEFAULT_LISTEN)
+    listen_interfaces: InterfaceListen = ()
     timeout: float = DEFAULT_TIMEOUT
     interval: float = DEFAULT_INTERVAL
     route_filter: RouteFilter = RouteFilter.OFF

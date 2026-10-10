@@ -18,6 +18,7 @@ let
       server =
         {
           listen = cfg.listen;
+          listen_interfaces = cfg.listenInterfaces;
           timeout = cfg.timeout;
           interval = cfg.interval;
           route_filter = cfg.routeFilter;
@@ -60,6 +61,20 @@ in
       description = ''
         "host:port" pairs to listen on. Port 53 needs root, which the
         system daemon has.
+      '';
+    };
+
+    listenInterfaces = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "bridge*:53" ];
+      description = ''
+        "pattern:port" pairs: listen on every address of the interfaces
+        the fnmatch pattern names, following them as they come and go.
+
+        The default serves the VM bridges. Their guests get the bridge
+        address as DNS server, which mDNSResponder answers through a
+        wildcard bind on port 53 that fails while this daemon holds port
+        53, so without this the guests have no DNS at all.
       '';
     };
 

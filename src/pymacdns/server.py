@@ -4,6 +4,7 @@ import contextlib
 import errno
 import ipaddress
 import sys
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 import anyio
@@ -13,6 +14,7 @@ import httpx
 
 from pymacdns import cache as cache_mod
 from pymacdns import control as control_mod
+from pymacdns import interfaces as interfaces_mod
 from pymacdns import latency as latency_mod
 from pymacdns import resolver as resolver_mod
 from pymacdns import routes as routes_mod
@@ -148,6 +150,94 @@ async def serve_tcp_listener(
     await listener.serve(lambda stream: _tcp_connection(stream, state))
 
 
+async def _serve_address(
+    host: str,
+    port: int,
+    state: DnsState,
+    report: bool,
+    *,
+    task_status: anyio.abc.TaskStatus[anyio.CancelScope | None] = (
+        anyio.TASK_STATUS_IGNORED
+    ),
+) -> None:
+    """Serve one address until cancelled through the scope it starts with.
+
+    Starts with None when neither protocol binds.
+    """
+    try:
+        udp: anyio.abc.UDPSocket | None = await anyio.create_udp_socket(
+            local_host=host, local_port=port
+        )
+    except OSError as exc:
+        udp = None
+        if report:
+            print(_bind_hint(host, port, "UDP", exc), file=sys.stderr)
+    try:
+        tcp: anyio.abc.MultiListener[anyio.abc.SocketStream] | None = (
+            await anyio.create_tcp_listener(local_host=host, local_port=port)
+        )
+    except OSError as exc:
+        tcp = None
+        if report:
+            print(_bind_hint(host, port, "TCP", exc), file=sys.stderr)
+    if udp is None and tcp is None:
+        task_status.started(None)
+        return
+    # serve_tcp_listener leaves closing to its caller; an address that goes
+    # away must free its port for the next bridge that takes it.
+    async with contextlib.AsyncExitStack() as stack, anyio.create_task_group() as tg:
+        if tcp is not None:
+            await stack.enter_async_context(tcp)
+        if udp is not None:
+            tg.start_soon(serve_udp_sock, udp, state)
+        if tcp is not None:
+            tg.start_soon(serve_tcp_listener, tcp, state)
+        task_status.started(tg.cancel_scope)
+
+
+async def serve_interfaces(
+    listen: tuple[tuple[str, int], ...],
+    state: DnsState,
+    interval: float,
+    read: Callable[[], Mapping[str, Iterable[str]]] = (
+        interfaces_mod.read_interface_addresses
+    ),
+) -> None:
+    """Follow the addresses of matching interfaces, binding as they come and go.
+
+    A VM bridge exists only while a VM runs, so a fixed listen list cannot
+    name its address.
+    """
+    serving: dict[tuple[str, int], anyio.CancelScope] = {}
+    failed: set[tuple[str, int]] = set()
+    async with anyio.create_task_group() as tg:
+        while True:
+            try:
+                entries = await anyio.to_thread.run_sync(read)
+            except Exception:  # noqa: BLE001 - next tick retries
+                entries = None
+            if entries is not None:
+                wanted = {
+                    (host, port)
+                    for pattern, port in listen
+                    for host in interfaces_mod.select_addresses(entries, [pattern])
+                }
+                for key in serving.keys() - wanted:
+                    serving.pop(key).cancel()
+                failed &= wanted
+                for key in wanted - serving.keys():
+                    host, port = key
+                    scope = await tg.start(
+                        _serve_address, host, port, state, key not in failed
+                    )
+                    if scope is None:
+                        failed.add(key)
+                    else:
+                        serving[key] = scope
+                        failed.discard(key)
+            await anyio.sleep(interval)
+
+
 async def refresh_loop(
     state: DnsState, self_hosts: set[str], timeout: float, config_path: str
 ) -> None:
@@ -216,6 +306,13 @@ async def run(
             tg.start_soon(
                 refresh_loop, state, self_hosts, settings.server.timeout, config_path
             )
+            if settings.server.listen_interfaces:
+                tg.start_soon(
+                    serve_interfaces,
+                    settings.server.listen_interfaces,
+                    state,
+                    settings.server.interval,
+                )
             tg.start_soon(
                 serve_control_guarded,
                 settings.server.control_socket,

@@ -15,6 +15,10 @@
 
 [server]
 listen = ["127.0.0.1:53", "[::1]:53"]
+# Also serve every address of the interfaces these globs name, checked
+# every `interval`. VM guests on macOS's NAT use their bridge address as
+# DNS server, and holding port 53 stops mDNSResponder serving it.
+listen_interfaces = ["bridge*:53"]
 timeout = 2.0
 interval = 1.0
 # Prune unroutable addresses from responses: "off" (transparent,

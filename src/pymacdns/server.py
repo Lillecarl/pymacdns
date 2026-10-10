@@ -95,6 +95,9 @@ async def handle_wire(wire: bytes, state: DnsState, use_tcp: bool) -> bytes:
 async def serve_udp_sock(
     sock: anyio.abc.UDPSocket, state: DnsState
 ) -> None:
+    # anyio allows one writer per socket and raises BusyResourceError on a
+    # second, which takes the whole server down under concurrent queries.
+    send_lock = anyio.Lock()
     async with sock, anyio.create_task_group() as tg:
         while True:
             data, addr = await sock.receive()
@@ -104,7 +107,11 @@ async def serve_udp_sock(
                     reply = await handle_wire(data, state, use_tcp=False)
                 except ValueError:
                     return
-                await sock.sendto(reply, addr[0], addr[1])
+                async with send_lock:
+                    # A lost UDP reply is the client's to retry, never a
+                    # reason to stop serving everyone else.
+                    with contextlib.suppress(OSError):
+                        await sock.sendto(reply, addr[0], addr[1])
 
             tg.start_soon(_one)
 

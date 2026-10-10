@@ -141,3 +141,50 @@ async def test_full_path():
         assert [r.address for rr in resp.answer for r in rr] == ["93.184.216.34"]
 
         tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_udp_concurrent_replies_keep_server_up(monkeypatch):
+    """Replies that become ready together must not crash the server.
+
+    Every lookup waits on one event, as slow upstream answers do in
+    practice, so all sends start in the same loop pass and collide on
+    the socket's one-writer guard unless the server serialises them.
+    """
+    clients = 50
+    release = anyio.Event()
+    waiting = 0
+
+    async def held_handle_wire(wire: bytes, state, use_tcp: bool) -> bytes:
+        nonlocal waiting
+        waiting += 1
+        await release.wait()
+        return resolver_mod.special_response(wire)
+
+    monkeypatch.setattr(server_mod, "handle_wire", held_handle_wire)
+    ours = 15373
+    answered = 0
+
+    async def ask() -> None:
+        nonlocal answered
+        q = dns.message.make_query("localhost.", "A").to_wire()
+        sock = await anyio.create_connected_udp_socket("127.0.0.1", ours)
+        async with sock:
+            await sock.send(q)
+            dns.message.from_wire(await sock.receive())
+        answered += 1
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            udp_sock = await anyio.create_udp_socket(
+                local_host="127.0.0.1", local_port=ours
+            )
+            tg.start_soon(server_mod.serve_udp_sock, udp_sock, server_mod.DnsState())
+            async with anyio.create_task_group() as askers:
+                for _ in range(clients):
+                    askers.start_soon(ask)
+                while waiting < clients:
+                    await anyio.sleep(0.01)
+                release.set()
+            assert answered == clients
+            tg.cancel_scope.cancel()

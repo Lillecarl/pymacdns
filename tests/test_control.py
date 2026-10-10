@@ -60,6 +60,29 @@ async def test_socket_round_trip(sock_dir):
 
 
 @pytest.mark.anyio
+async def test_client_leaving_early_keeps_serving(sock_dir):
+    """A client that hangs up must not stop the server.
+
+    The control listener shares the DNS server's task group, so one
+    unhandled broken pipe here took DNS down with it.
+    """
+    sock = str(sock_dir / "ctl.sock")
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(control_mod.serve_control, sock, filled_cache())
+        await anyio.sleep(0.2)
+        for request in (b"", b"not json\n"):
+            for _ in range(20):
+                stream = await anyio.connect_unix(sock)
+                if request:
+                    await stream.send(request)
+                await stream.aclose()
+        await anyio.sleep(0.2)
+        reply = await control_mod.control_request(sock, {"op": "list"})
+        assert len(reply["entries"]) == 2
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
 async def test_socket_group_opens_to_group(sock_dir):
     sock = str(sock_dir / "ctl.sock")
     # Own primary group: chown needs no privilege for this.

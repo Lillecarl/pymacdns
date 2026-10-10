@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -20,6 +21,17 @@ async def handle_connection(
     cache: cache_mod.DnsCache,
     stats: latency_mod.LatencyStats | None = None,
 ) -> None:
+    # The listener runs in the server's task group, so an error escaping
+    # here stops DNS too. A client that leaves early is its own problem.
+    with contextlib.suppress(anyio.BrokenResourceError, anyio.ClosedResourceError):
+        await _answer(stream, cache, stats)
+
+
+async def _answer(
+    stream: anyio.abc.SocketStream,
+    cache: cache_mod.DnsCache,
+    stats: latency_mod.LatencyStats | None,
+) -> None:
     async with stream:
         data = b""
         while b"\n" not in data:
@@ -30,6 +42,8 @@ async def handle_connection(
             data += chunk
             if len(data) > MAX_REQUEST_BYTES:
                 return
+        if not data:
+            return
         try:
             request = json.loads(data.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):

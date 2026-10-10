@@ -1,5 +1,6 @@
 """Shared fakes for transport tests: trustme contexts, loopback servers."""
 
+import socket
 import ssl
 
 import anyio
@@ -7,6 +8,25 @@ import dns.message
 import dns.rcode
 import dns.rrset
 import trustme
+
+
+def free_port() -> int:
+    """A loopback port the OS just handed out, free on both TCP and UDP.
+
+    Fixed ports collide with a run seconds earlier and with a parallel
+    run. The daemon binds both protocols on one port, so UDP is checked
+    too. A small race remains until the caller binds.
+    """
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.bind(("127.0.0.1", 0))
+            port = tcp.getsockname()[1]
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                try:
+                    udp.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+        return port
 
 
 def make_contexts(host: str = "127.0.0.1") -> tuple[ssl.SSLContext, ssl.SSLContext]:

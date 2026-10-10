@@ -5,7 +5,7 @@ import dns.message
 import dns.rcode
 import pytest
 from anyio.streams.tls import TLSListener
-from helpers import answer_plain_udp, answer_tls, make_contexts
+from helpers import answer_plain_udp, answer_tls, free_port, make_contexts
 
 from pymacdns import resolver as resolver_mod
 
@@ -53,7 +53,7 @@ async def test_lookup_rejects_unknown_scheme():
 async def test_dot_loopback_verified_and_fail_closed():
     server_ctx, client_ctx = make_contexts()
 
-    port = 18553
+    port = free_port()
     plain = await anyio.create_tcp_listener(local_host="127.0.0.1", local_port=port)
     listener = TLSListener(plain, server_ctx)
     wire = dns.message.make_query("example.com.", "A").to_wire()
@@ -75,7 +75,7 @@ async def test_listed_order_decides():
     """No magic priority: whoever is listed first wins when both work."""
     server_ctx, client_ctx = make_contexts()
 
-    tls_port, plain_port = 18554, 18555
+    tls_port, plain_port = free_port(), free_port()
     wire = dns.message.make_query("example.com.", "A").to_wire()
     # The plaintext answer carries 192.0.2.1, the TLS one is empty:
     # whichever is listed first must be the one served.

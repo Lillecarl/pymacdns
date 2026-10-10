@@ -3,7 +3,7 @@
 import anyio
 import pytest
 from anyio.streams.tls import TLSListener
-from helpers import answer_plain_udp, answer_tls, make_contexts
+from helpers import answer_plain_udp, answer_tls, free_port, make_contexts
 
 from pymacdns import resolver as resolver_mod
 from pymacdns import status as status_mod
@@ -70,7 +70,7 @@ def test_render_aligns_cells():
 async def test_check_live_and_unreachable():
     server_ctx, client_ctx = make_contexts()
 
-    tls_port, plain_port = 18560, 18561
+    tls_port, plain_port = free_port(), free_port()
     plain_listener = await anyio.create_tcp_listener(
         local_host="127.0.0.1", local_port=tls_port
     )

@@ -10,6 +10,7 @@ import dns.message
 import dns.rcode
 import dns.rrset
 import pytest
+from helpers import free_port
 
 from pymacdns import cache as cache_mod
 from pymacdns import resolver as resolver_mod
@@ -85,13 +86,14 @@ class Clock:
 @pytest.mark.anyio
 async def test_full_path():
     clock = Clock()
-    fake = FakeUpstream(15371)
+    upstream_port = free_port()
+    fake = FakeUpstream(upstream_port)
     state = server_mod.DnsState()
     state.cache = cache_mod.DnsCache(clock=clock)
     state.standard = resolver_mod.Upstream(
-        nameservers=["127.0.0.1:15371"], timeout=1.0
+        nameservers=[f"127.0.0.1:{upstream_port}"], timeout=1.0
     )
-    ours = 15372
+    ours = free_port()
 
     async def ask(name, qtype="A", tcp=False):
         q = dns.message.make_query(name, qtype).to_wire()
@@ -162,7 +164,7 @@ async def test_udp_concurrent_replies_keep_server_up(monkeypatch):
         return resolver_mod.special_response(wire)
 
     monkeypatch.setattr(server_mod, "handle_wire", held_handle_wire)
-    ours = 15373
+    ours = free_port()
     answered = 0
 
     async def ask() -> None:

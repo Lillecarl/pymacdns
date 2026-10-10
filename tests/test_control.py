@@ -1,6 +1,7 @@
 """Control protocol: pure dispatch plus socket round-trips."""
 
 import grp
+import os
 import stat
 from functools import partial
 
@@ -42,59 +43,34 @@ def test_dispatch_list_remove_clear():
 
 
 @pytest.mark.anyio
-async def test_socket_round_trip(tmp_path):
-    import os
-    import tempfile
-
-    # NOTE: macOS caps AF_UNIX paths at 104 chars, pytest tmp paths
-    # exceed it, so bind under a short unique /tmp dir instead.
-    # (A fixed /tmp name risks stale files and PID reuse across runs.)
-    rundir = tempfile.mkdtemp(prefix="pmdns", dir="/tmp")
-    sock = os.path.join(rundir, "ctl.sock")
-    try:
-        cache = filled_cache()
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(control_mod.serve_control, sock, cache)
-            await anyio.sleep(0.2)
-            reply = await control_mod.control_request(sock, {"op": "list"})
-            assert len(reply["entries"]) == 2
-            reply = await control_mod.control_request(
-                sock, {"op": "remove", "name": "a.lab.", "qtype": "A"}
-            )
-            assert reply == {"removed": 1}
-            assert stat.S_IMODE(os.stat(sock).st_mode) == 0o600
-            tg.cancel_scope.cancel()
-    finally:
-        try:
-            os.unlink(sock)
-            os.rmdir(rundir)
-        except OSError:
-            pass
+async def test_socket_round_trip(sock_dir):
+    sock = str(sock_dir / "ctl.sock")
+    cache = filled_cache()
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(control_mod.serve_control, sock, cache)
+        await anyio.sleep(0.2)
+        reply = await control_mod.control_request(sock, {"op": "list"})
+        assert len(reply["entries"]) == 2
+        reply = await control_mod.control_request(
+            sock, {"op": "remove", "name": "a.lab.", "qtype": "A"}
+        )
+        assert reply == {"removed": 1}
+        assert stat.S_IMODE(os.stat(sock).st_mode) == 0o600
+        tg.cancel_scope.cancel()
 
 
 @pytest.mark.anyio
-async def test_socket_group_opens_to_group():
-    import os
-    import tempfile
-
-    rundir = tempfile.mkdtemp(prefix="pmdns", dir="/tmp")
-    sock = os.path.join(rundir, "ctl.sock")
+async def test_socket_group_opens_to_group(sock_dir):
+    sock = str(sock_dir / "ctl.sock")
     # Own primary group: chown needs no privilege for this.
     group = grp.getgrgid(os.getgid()).gr_name
-    try:
-        cache = filled_cache()
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(partial(control_mod.serve_control, sock, cache, group))
-            await anyio.sleep(0.2)
-            st = os.stat(sock)
-            assert stat.S_IMODE(st.st_mode) == 0o770
-            assert st.st_gid == os.getgid()
-            reply = await control_mod.control_request(sock, {"op": "list"})
-            assert len(reply["entries"]) == 2
-            tg.cancel_scope.cancel()
-    finally:
-        try:
-            os.unlink(sock)
-            os.rmdir(rundir)
-        except OSError:
-            pass
+    cache = filled_cache()
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(partial(control_mod.serve_control, sock, cache, group))
+        await anyio.sleep(0.2)
+        st = os.stat(sock)
+        assert stat.S_IMODE(st.st_mode) == 0o770
+        assert st.st_gid == os.getgid()
+        reply = await control_mod.control_request(sock, {"op": "list"})
+        assert len(reply["entries"]) == 2
+        tg.cancel_scope.cancel()

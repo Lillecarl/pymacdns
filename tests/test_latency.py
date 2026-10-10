@@ -4,7 +4,7 @@ import anyio
 import dns.message
 import dns.rcode
 import pytest
-from helpers import answer_plain_udp
+from helpers import answer_plain_udp, free_port
 
 from pymacdns import latency as latency_mod
 from pymacdns import resolver as resolver_mod
@@ -85,7 +85,7 @@ def test_format_table_aligns():
 
 @pytest.mark.anyio
 async def test_lookup_records_winner_and_errors():
-    port = 18562
+    port = free_port()
     udp_sock = await anyio.create_udp_socket(
         local_host="127.0.0.1", local_port=port
     )
@@ -109,7 +109,7 @@ async def test_lookup_records_winner_and_errors():
 
 @pytest.mark.anyio
 async def test_lookup_records_nothing_unobserved():
-    port = 18563
+    port = free_port()
     udp_sock = await anyio.create_udp_socket(
         local_host="127.0.0.1", local_port=port
     )
@@ -130,7 +130,7 @@ async def test_lookup_records_nothing_unobserved():
 async def test_handle_wire_records_upstream_latency():
     from pymacdns import server as server_mod
 
-    port = 18564
+    port = free_port()
     udp_sock = await anyio.create_udp_socket(
         local_host="127.0.0.1", local_port=port
     )

@@ -6,7 +6,7 @@ import dns.rcode
 import httpx
 import pytest
 from anyio.streams.tls import TLSListener
-from helpers import answer_doh, answer_plain_udp, make_contexts
+from helpers import answer_doh, answer_plain_udp, free_port, make_contexts
 
 from pymacdns import resolver as resolver_mod
 
@@ -48,7 +48,7 @@ async def serve_doh(port: int, server_ctx) -> TLSListener:
 async def test_doh_loopback_verified_and_fail_closed():
     server_ctx, client_ctx = make_contexts()
 
-    port = 18556
+    port = free_port()
     listener = await serve_doh(port, server_ctx)
     wire = dns.message.make_query("example.com.", "A").to_wire()
     upstream = resolver_mod.Upstream(
@@ -72,7 +72,7 @@ async def test_listed_order_decides():
     """No magic priority: whoever is listed first wins when both work."""
     server_ctx, client_ctx = make_contexts()
 
-    tls_port, plain_port = 18557, 18558
+    tls_port, plain_port = free_port(), free_port()
     wire = dns.message.make_query("example.com.", "A").to_wire()
     for nameservers, expect_plain in (
         ([f"127.0.0.1:{plain_port}", f"https://127.0.0.1:{tls_port}/dns-query"], True),
@@ -109,7 +109,7 @@ async def test_doh_client_pooled():
     """One shared client opens one connection; per-call clients dial each time."""
     server_ctx, client_ctx = make_contexts()
 
-    port = 18559
+    port = free_port()
     listener = await serve_doh(port, server_ctx)
     accepted: list[None] = []
 

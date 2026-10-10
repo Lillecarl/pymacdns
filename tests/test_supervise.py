@@ -14,6 +14,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from helpers import free_port
 
 from pymacdns import installer as installer_mod
 from pymacdns.control import control_request
@@ -71,12 +72,23 @@ def port_free(port: int) -> bool:
 
 
 async def spawn(
-    marker: Path, tag: str, port: int, wait: bool = True, resolv: Path | None = None
+    marker: Path,
+    sock_dir: Path,
+    port: int,
+    wait: bool = True,
+    resolv: Path | None = None,
 ):
-    control_sock = f"/tmp/pmdns-{os.getpid()}-{tag}.sock"
-    proc = await anyio.open_process(
-        base_args(marker, control_sock, port, resolv), cwd=ROOT, env=proc_env()
-    )
+    control_sock = str(sock_dir / "ctl.sock")
+    # Output to a file, not a pipe: nobody reads a pipe here, and a full
+    # one blocks the daemon on its next write.
+    with (sock_dir / "daemon.log").open("ab") as log:
+        proc = await anyio.open_process(
+            base_args(marker, control_sock, port, resolv),
+            cwd=ROOT,
+            env=proc_env(),
+            stdout=log,
+            stderr=log,
+        )
     if wait:
         await wait_for(marker)
     return proc, control_sock
@@ -90,16 +102,17 @@ async def reap(proc) -> None:
 
 
 @pytest.mark.anyio
-async def test_kill_parent_cleans_up(tmp_path):
+async def test_kill_parent_cleans_up(tmp_path, sock_dir):
     """SIGKILL the supervisor: the server must clean up and exit too."""
     marker = tmp_path / "installed"
-    proc, _ = await spawn(marker, "kp", 15521)
+    port = free_port()
+    proc, _ = await spawn(marker, sock_dir, port)
     try:
         with anyio.fail_after(60):
             proc.kill()
             await wait_gone(marker)
             with anyio.fail_after(10):
-                while not port_free(15521):
+                while not port_free(port):
                     await anyio.sleep(0.1)
             await proc.wait()
     finally:
@@ -107,10 +120,10 @@ async def test_kill_parent_cleans_up(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_kill_child_cleans_up(tmp_path):
+async def test_kill_child_cleans_up(tmp_path, sock_dir):
     """SIGKILL the server: the supervisor must clean up and exit."""
     marker = tmp_path / "installed"
-    proc, control_sock = await spawn(marker, "kc", 15522)
+    proc, control_sock = await spawn(marker, sock_dir, free_port())
     try:
         with anyio.fail_after(60):
             # The marker lands before the control socket exists; imports
@@ -125,9 +138,9 @@ async def test_kill_child_cleans_up(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_sigterm_cleans_up(tmp_path):
+async def test_sigterm_cleans_up(tmp_path, sock_dir):
     marker = tmp_path / "installed"
-    proc, _ = await spawn(marker, "st", 15523)
+    proc, _ = await spawn(marker, sock_dir, free_port())
     try:
         with anyio.fail_after(60):
             proc.terminate()
@@ -158,10 +171,10 @@ def test_install_partial_rolls_back(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_failed_install_exits_nonzero(tmp_path):
+async def test_failed_install_exits_nonzero(tmp_path, sock_dir):
     """Uninstallable config exits nonzero with nothing left behind."""
     marker = tmp_path / "no-such-dir" / "installed"
-    proc, _ = await spawn(marker, "fi", 15524, wait=False)
+    proc, _ = await spawn(marker, sock_dir, free_port(), wait=False)
     try:
         with anyio.fail_after(60):
             code = await proc.wait()
@@ -171,7 +184,7 @@ async def test_failed_install_exits_nonzero(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_resolv_conf_managed_and_restored(tmp_path):
+async def test_resolv_conf_managed_and_restored(tmp_path, sock_dir):
     """The daemon's block is present while running, gone after exit."""
     from pymacdns.installer import BEGIN_MARK
 
@@ -179,7 +192,7 @@ async def test_resolv_conf_managed_and_restored(tmp_path):
     dummy.write_text("nameserver 9.9.9.9\n")
     before = dummy.read_bytes()
     marker = tmp_path / "installed"
-    proc, _ = await spawn(marker, "rc", 15525, resolv=dummy)
+    proc, _ = await spawn(marker, sock_dir, free_port(), resolv=dummy)
     try:
         with anyio.fail_after(60):
             with anyio.fail_after(10):

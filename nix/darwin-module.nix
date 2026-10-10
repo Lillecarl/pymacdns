@@ -109,8 +109,8 @@ in
         Point this resolv.conf at our listeners while running. The daemon
         inserts a delimited block and removes only that block on exit;
         null manages nothing. macOS regenerates /etc/resolv.conf on
-        network changes, which silently drops the block until restart --
-        the failure direction is plain DHCP DNS, not an outage.
+        every DNS change, systemDns included, and drops the block; the
+        daemon checks every 2s and puts it back.
       '';
     };
 

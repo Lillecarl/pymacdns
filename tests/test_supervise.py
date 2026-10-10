@@ -201,6 +201,12 @@ async def test_resolv_conf_managed_and_restored(tmp_path, sock_dir):
             running = dummy.read_text()
             assert "nameserver 127.0.0.1\n" in running
             assert "nameserver 9.9.9.9\n" in running
+            # configd regenerates the file on DNS changes and drops the
+            # block; the daemon must put it back.
+            dummy.write_text("nameserver 9.9.9.9\n")
+            with anyio.fail_after(10):
+                while BEGIN_MARK not in dummy.read_text():
+                    await anyio.sleep(0.05)
             proc.terminate()
             await proc.wait()
             assert dummy.read_bytes() == before

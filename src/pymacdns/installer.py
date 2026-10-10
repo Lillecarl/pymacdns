@@ -55,6 +55,19 @@ def install_all(items: list[Installer], done: list[Installer]) -> None:
         done.append(item)
 
 
+def reapply_all(items: list[Installer]) -> None:
+    """Install again what the system undoes behind our back.
+
+    configd regenerates /etc/resolv.conf on every DNS change, including
+    the one SystemDns causes, and drops our block. ResolvConf.install
+    writes only on a difference, so a steady file costs one read and
+    never triggers configd itself.
+    """
+    for item in items:
+        if isinstance(item, ResolvConf):
+            item.install()
+
+
 def cleanup_all(items: list[Installer]) -> None:
     for item in items:
         try:

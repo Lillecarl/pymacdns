@@ -3,11 +3,15 @@ from __future__ import annotations
 import os
 import signal
 import socket
+import sys
 from collections.abc import Awaitable, Callable
+from typing import Final
 
 import anyio
 
 from pymacdns import installer as installer_mod
+
+REAPPLY_INTERVAL: Final = 2.0
 
 
 def run_supervised(
@@ -81,6 +85,7 @@ async def _child(
             await anyio.to_thread.run_sync(
                 installer_mod.install_all, installers, installed
             )
+            tg.start_soon(_reapply, installed)
             tg.start_soon(child_main)
     finally:
         installer_mod.cleanup_all(installed)
@@ -88,6 +93,15 @@ async def _child(
             os.close(pipe_fd)
         except OSError:
             pass
+
+
+async def _reapply(installed: list[installer_mod.Installer]) -> None:
+    while True:
+        await anyio.sleep(REAPPLY_INTERVAL)
+        try:
+            await anyio.to_thread.run_sync(installer_mod.reapply_all, installed)
+        except Exception as exc:  # noqa: BLE001 - keep serving, retry next tick
+            print(f"pymacdns: reapply failed: {exc}", file=sys.stderr)
 
 
 async def watch_parent(pipe_fd: int, scope: anyio.CancelScope) -> None:

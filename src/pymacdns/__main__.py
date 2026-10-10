@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import socket
 import subprocess
@@ -17,7 +18,7 @@ from pymacdns import server as server_mod
 from pymacdns import status as status_mod
 from pymacdns import store as store_mod
 from pymacdns.config import DEFAULT_CONFIG_PATH, DaemonSettings, parse_listen
-from pymacdns.control import Release, control_request
+from pymacdns.control import Lifecycle, control_request
 from pymacdns.store import dump_toml
 from pymacdns.supervise import run_supervised
 
@@ -62,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "nuke",
         help="remove every DNS setting pymacdns installs and flush caches (root)",
+    )
+    sub.add_parser(
+        "restore", help="have a daemon released by nuke install its settings again"
     )
     cache_parser = sub.add_parser("cache", help="inspect the daemon cache")
     cache_sub = cache_parser.add_subparsers(dest="cache_op", required=True)
@@ -238,7 +242,7 @@ def nuke_main(args: argparse.Namespace) -> int:
     except SystemExit:
         settings = DaemonSettings()
     # First, so a running daemon stops restoring what we remove below.
-    released = release_daemon(settings.server.control_socket)
+    released = "released" in ask_daemon(settings.server.control_socket, "release")
     if released:
         print("daemon released its settings")
     targets = installer_mod.nuke_targets(installers_for(settings))
@@ -259,42 +263,56 @@ def nuke_main(args: argparse.Namespace) -> int:
             failed = True
     if released:
         print(
-            "pymacdns: the daemon still answers on its listen addresses and "
-            "installs again when it restarts; stop it through launchd",
+            "pymacdns: the daemon still answers on its listen addresses; "
+            "`pymacdns restore`, a restart or a rebuild installs again",
             file=sys.stderr,
         )
     return 1 if failed else 0
 
 
-RELEASE_TIMEOUT: Final = 5.0
+CONTROL_TIMEOUT: Final = 5.0
 FLUSH_COMMANDS: Final = (
     ("/usr/bin/dscacheutil", "-flushcache"),
     ("/usr/bin/killall", "-HUP", "mDNSResponder"),
 )
 
 
-def release_daemon(path: str) -> bool:
-    """Ask a running daemon to drop its settings and stop restoring them.
+def ask_daemon(path: str, op: str) -> dict[str, object]:
+    """One control request; {"error": ...} when the daemon cannot answer.
 
     Synchronous with a timeout: a wedged daemon must not hang the
     cleanup that is meant to recover from it.
     """
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(RELEASE_TIMEOUT)
+        sock.settimeout(CONTROL_TIMEOUT)
         try:
             sock.connect(path)
-            sock.sendall(b'{"op": "release"}\n')
-            return b'"released"' in sock.recv(4096)
-        except OSError:
-            return False
+            sock.sendall((json.dumps({"op": op}) + "\n").encode())
+            data = b""
+            while chunk := sock.recv(4096):
+                data += chunk
+            reply = json.loads(data)
+        except (OSError, ValueError) as exc:
+            return {"error": f"no answer from {path}: {exc}"}
+    return reply if isinstance(reply, dict) else {"error": "bad reply"}
+
+
+def restore_main(args: argparse.Namespace) -> int:
+    """Have a released daemon install its settings again."""
+    reply = ask_daemon(socket_path(args), "restore")
+    if "restored" in reply:
+        print("daemon settings installed")
+        return 0
+    print(f"pymacdns: {reply.get('error')}", file=sys.stderr)
+    return 1
 
 
 def serve_main(args: argparse.Namespace) -> int:
     settings = load_settings(args)
     installers = installers_for(settings)
 
-    async def child_main(release: Release) -> None:
-        await server_mod.run(settings, config_path=args.config, release=release)
+    async def child_main(lifecycle: Lifecycle) -> None:
+        await server_mod.run(settings, config_path=args.config, lifecycle=lifecycle)
 
     try:
         return run_supervised(installers, child_main)
@@ -328,6 +346,8 @@ def main() -> None:
         sys.exit(code)
     if args.command == "nuke":
         sys.exit(nuke_main(args))
+    if args.command == "restore":
+        sys.exit(restore_main(args))
     # Forks here, before any thread or event loop exists.
     try:
         code = serve_main(args)

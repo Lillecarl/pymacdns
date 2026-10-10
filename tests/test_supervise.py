@@ -240,5 +240,45 @@ async def test_release_drops_settings_and_keeps_serving(tmp_path, sock_dir):
             assert proc.returncode is None
             reply = await control_request(control_sock, {"op": "pid"})
             assert reply == {"pid": pid}
+
+            # restore through the CLI, as activation runs it.
+            result = await anyio.run_process(
+                [sys.executable, "-m", "pymacdns", "--socket", control_sock, "restore"],
+                cwd=ROOT,
+                env=proc_env(),
+                check=False,
+            )
+            assert result.returncode == 0, result.stderr
+            assert marker.exists()
+            assert BEGIN_MARK in dummy.read_text()
+            # Restored means restored: the reapply loop runs again.
+            dummy.write_bytes(before)
+            with anyio.fail_after(10):
+                while BEGIN_MARK not in dummy.read_text():
+                    await anyio.sleep(0.05)
+            # A second restore of an installed daemon changes nothing.
+            reply = await control_request(control_sock, {"op": "restore"})
+            assert reply == {"restored": True}
+            assert reply == await control_request(control_sock, {"op": "restore"})
+            assert (await control_request(control_sock, {"op": "pid"}))["pid"] == pid
     finally:
         await reap(proc)
+
+
+@pytest.mark.anyio
+async def test_restore_without_daemon_fails(sock_dir):
+    result = await anyio.run_process(
+        [
+            sys.executable,
+            "-m",
+            "pymacdns",
+            "--socket",
+            str(sock_dir / "absent.sock"),
+            "restore",
+        ],
+        cwd=ROOT,
+        env=proc_env(),
+        check=False,
+    )
+    assert result.returncode == 1
+    assert b"no answer" in result.stderr

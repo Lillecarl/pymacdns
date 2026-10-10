@@ -166,6 +166,16 @@ in
 
     environment.etc."pymacdns/config.toml".source = configFile;
 
+    # A daemon released by `pymacdns nuke` keeps running, and launchd
+    # reloads it only when the plist changes. Ask it to install again,
+    # so every switch restores DNS; for an installed daemon it is a
+    # no-op. Never fails the switch: a daemon that is still starting
+    # installs on its own.
+    system.activationScripts.postActivation.text = lib.mkAfter ''
+      ${lib.getExe cfg.package} --config ${configFile} restore \
+        || echo "pymacdns: restore skipped; the daemon installs when it starts" >&2
+    '';
+
     launchd.daemons.pymacdns = {
       serviceConfig = {
         # ProgramArguments and not `command`: no shell quoting between the

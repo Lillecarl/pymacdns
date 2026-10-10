@@ -5,19 +5,21 @@ import signal
 import socket
 import sys
 from collections.abc import Awaitable, Callable
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import anyio
 
 from pymacdns import installer as installer_mod
-from pymacdns.control import Release
+
+if TYPE_CHECKING:
+    from pymacdns.control import Lifecycle
 
 REAPPLY_INTERVAL: Final = 2.0
 
 
 def run_supervised(
     installers: list[installer_mod.Installer],
-    child_main: Callable[[Release], Awaitable[None]],
+    child_main: Callable[[Lifecycle], Awaitable[None]],
 ) -> int:
     """Fork early into supervisor and server, return the exit code.
 
@@ -76,51 +78,75 @@ def _supervise(
 async def _child(
     pipe_fd: int,
     installers: list[installer_mod.Installer],
-    child_main: Callable[[Release], Awaitable[None]],
+    child_main: Callable[[Lifecycle], Awaitable[None]],
 ) -> None:
-    installed: list[installer_mod.Installer] = []
-    # Shared with _reapply, so a reapply in flight cannot rewrite what a
-    # release has just removed.
-    lock = anyio.Lock()
-    released = anyio.Event()
-
-    async def release() -> None:
-        """Remove our settings and stop restoring them, keep serving."""
-        async with lock:
-            released.set()
-            await anyio.to_thread.run_sync(installer_mod.cleanup_all, installed)
-
+    installation = Installation(installers)
     try:
         async with anyio.create_task_group() as tg:
             tg.start_soon(watch_parent, pipe_fd, tg.cancel_scope)
             tg.start_soon(_watch_signals, tg.cancel_scope)
             await anyio.to_thread.run_sync(
-                installer_mod.install_all, installers, installed
+                installer_mod.install_all, installers, installation.installed
             )
-            tg.start_soon(_reapply, installed, lock, released)
-            tg.start_soon(child_main, release)
+            tg.start_soon(installation.reapply_forever)
+            tg.start_soon(child_main, installation)
     finally:
-        installer_mod.cleanup_all(installed)
+        installer_mod.cleanup_all(installation.installed)
         try:
             os.close(pipe_fd)
         except OSError:
             pass
 
 
-async def _reapply(
-    installed: list[installer_mod.Installer],
-    lock: anyio.Lock,
-    released: anyio.Event,
-) -> None:
-    while True:
-        await anyio.sleep(REAPPLY_INTERVAL)
-        async with lock:
-            if released.is_set():
+class Installation:
+    """The settings the server installed, and the control socket's hold on them.
+
+    One lock serialises reapply, release and restore, so a reapply in
+    flight cannot rewrite what a release has just removed.
+    """
+
+    def __init__(self, installers: list[installer_mod.Installer]) -> None:
+        self.installers = installers
+        self.installed: list[installer_mod.Installer] = []
+        self.released = False
+        self._lock = anyio.Lock()
+
+    async def release(self) -> None:
+        async with self._lock:
+            self.released = True
+            await anyio.to_thread.run_sync(
+                installer_mod.cleanup_all, self.installed
+            )
+            self.installed.clear()
+
+    async def restore(self) -> None:
+        async with self._lock:
+            if not self.released:
                 return
             try:
-                await anyio.to_thread.run_sync(installer_mod.reapply_all, installed)
-            except Exception as exc:  # noqa: BLE001 - keep serving, retry next tick
-                print(f"pymacdns: reapply failed: {exc}", file=sys.stderr)
+                await anyio.to_thread.run_sync(
+                    installer_mod.install_all, self.installers, self.installed
+                )
+            except BaseException:
+                await anyio.to_thread.run_sync(
+                    installer_mod.cleanup_all, self.installed
+                )
+                self.installed.clear()
+                raise
+            self.released = False
+
+    async def reapply_forever(self) -> None:
+        while True:
+            await anyio.sleep(REAPPLY_INTERVAL)
+            async with self._lock:
+                if self.released:
+                    continue
+                try:
+                    await anyio.to_thread.run_sync(
+                        installer_mod.reapply_all, self.installed
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep serving, retry
+                    print(f"pymacdns: reapply failed: {exc}", file=sys.stderr)
 
 
 async def watch_parent(pipe_fd: int, scope: anyio.CancelScope) -> None:

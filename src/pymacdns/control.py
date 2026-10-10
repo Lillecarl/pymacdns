@@ -4,9 +4,8 @@ import contextlib
 import json
 import os
 import shutil
-from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 import anyio
 import dns.rdatatype
@@ -16,26 +15,38 @@ from pymacdns import latency as latency_mod
 
 MAX_REQUEST_BYTES: Final = 65536
 
-Release = Callable[[], Awaitable[None]]
+
+
+class Lifecycle(Protocol):
+    """What the daemon installed into macOS, driven over the socket."""
+
+    async def release(self) -> None:
+        """Remove the settings and stop restoring them; keep serving."""
+
+    async def restore(self) -> None:
+        """Install released settings again; a no-op otherwise."""
+
+
+LIFECYCLE_OPS: Final = {"release": "released", "restore": "restored"}
 
 
 async def handle_connection(
     stream: anyio.abc.SocketStream,
     cache: cache_mod.DnsCache,
     stats: latency_mod.LatencyStats | None = None,
-    release: Release | None = None,
+    lifecycle: Lifecycle | None = None,
 ) -> None:
     # The listener runs in the server's task group, so an error escaping
     # here stops DNS too. A client that leaves early is its own problem.
     with contextlib.suppress(anyio.BrokenResourceError, anyio.ClosedResourceError):
-        await _answer(stream, cache, stats, release)
+        await _answer(stream, cache, stats, lifecycle)
 
 
 async def _answer(
     stream: anyio.abc.SocketStream,
     cache: cache_mod.DnsCache,
     stats: latency_mod.LatencyStats | None,
-    release: Release | None,
+    lifecycle: Lifecycle | None,
 ) -> None:
     async with stream:
         data = b""
@@ -54,19 +65,22 @@ async def _answer(
         except (ValueError, UnicodeDecodeError):
             await stream.send(b'{"error": "bad request"}\n')
             return
-        if isinstance(request, dict) and request.get("op") == "release":
-            reply = await _release(release)
+        if isinstance(request, dict) and request.get("op") in LIFECYCLE_OPS:
+            reply = await _lifecycle(lifecycle, str(request["op"]))
         else:
             reply = dispatch(cache, request, stats)
         payload = (json.dumps(reply) + "\n").encode()
         await stream.send(payload)
 
 
-async def _release(release: Release | None) -> dict[str, object]:
-    if release is None:
-        return {"error": "release unsupported"}
-    await release()
-    return {"released": True}
+async def _lifecycle(lifecycle: Lifecycle | None, op: str) -> dict[str, object]:
+    if lifecycle is None:
+        return {"error": f"{op} unsupported"}
+    try:
+        await getattr(lifecycle, op)()
+    except Exception as exc:  # noqa: BLE001 - the caller gets the reason
+        return {"error": f"{op} failed: {exc}"}
+    return {LIFECYCLE_OPS[op]: True}
 
 
 def dispatch(
@@ -112,7 +126,7 @@ async def serve_control(
     cache: cache_mod.DnsCache,
     group: str | None = None,
     stats: latency_mod.LatencyStats | None = None,
-    release: Release | None = None,
+    lifecycle: Lifecycle | None = None,
 ) -> None:
     """Serve the control socket, optionally opening it to a group.
 
@@ -134,7 +148,7 @@ async def serve_control(
     except OSError:
         pass
     await listener.serve(
-        lambda stream: handle_connection(stream, cache, stats, release)
+        lambda stream: handle_connection(stream, cache, stats, lifecycle)
     )
 
 

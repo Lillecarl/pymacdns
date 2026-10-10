@@ -5,7 +5,7 @@ import os
 import stat
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -182,3 +182,94 @@ class ResolvConf:
                 os.unlink(target)
         else:
             _atomic_write(target, rest)
+
+
+SYSTEM_DNS_KEY: Final = "State:/Network/Service/pymacdns/DNS"
+# Lowest order wins. VPN clients use 100000 and up, the primary service
+# about 200000 and mDNS 300000, so 1 puts us first. "local" and the mDNS
+# reverse zones still win for their names: mDNSResponder takes the
+# longest matching domain before it looks at the order.
+SYSTEM_DNS_ORDER: Final = 1
+DNS_PORT: Final = 53
+
+
+def system_dns_dict(listen: list[tuple[str, int]]) -> dict[str, object]:
+    """The SCDynamicStore DNS dictionary that routes every name to listen."""
+    ports = {port for _, port in listen}
+    if len(ports) != 1:
+        raise ValueError(f"system DNS needs one listen port, got {sorted(ports)}")
+    value: dict[str, object] = {
+        "ServerAddresses": [host for host, _ in listen],
+        "SupplementalMatchDomains": [""],
+        "SupplementalMatchOrders": [SYSTEM_DNS_ORDER],
+    }
+    (port,) = ports
+    if port != DNS_PORT:
+        value["ServerPort"] = port
+    return value
+
+
+@dataclass
+class SystemDns:
+    """Publish our listeners to mDNSResponder through SCDynamicStore.
+
+    The value is temporary: configd drops it when the session that added
+    it closes, so a SIGKILLed daemon leaves no stale resolver behind.
+    The session must therefore live as long as the daemon. Discovery in
+    store.py skips our own addresses, so this entry never loops back.
+    """
+
+    listen: list[tuple[str, int]]
+    _session: object | None = field(default=None, init=False, repr=False)
+
+    def install(self) -> None:
+        from SystemConfiguration import (
+            SCDynamicStoreAddTemporaryValue,
+            SCDynamicStoreCreate,
+            SCDynamicStoreRemoveValue,
+            SCError,
+            SCErrorString,
+        )
+
+        value = system_dns_dict(self.listen)
+        if self._session is None:
+            self._session = SCDynamicStoreCreate(None, "pymacdns-dns", None, None)
+        # AddTemporaryValue refuses an existing key.
+        SCDynamicStoreRemoveValue(self._session, SYSTEM_DNS_KEY)
+        if not SCDynamicStoreAddTemporaryValue(self._session, SYSTEM_DNS_KEY, value):
+            raise RuntimeError(
+                f"cannot publish {SYSTEM_DNS_KEY}: {SCErrorString(SCError())}"
+            )
+
+    def cleanup(self) -> None:
+        from SystemConfiguration import SCDynamicStoreCreate, SCDynamicStoreRemoveValue
+
+        session = self._session or SCDynamicStoreCreate(
+            None, "pymacdns-dns", None, None
+        )
+        SCDynamicStoreRemoveValue(session, SYSTEM_DNS_KEY)
+        self._session = None
+
+
+SYSTEM_RESOLV_CONF: Final = "/etc/resolv.conf"
+
+
+def nuke_targets(configured: list[Installer]) -> list[Installer]:
+    """Configured installers plus the system ones, each once.
+
+    The system ones join even when the config leaves them out: an
+    older config, or a config that failed to load, may have
+    installed them.
+    """
+    targets: list[Installer] = []
+    seen: set[tuple[type, str]] = set()
+    for item in [
+        *configured,
+        SystemDns(listen=[]),
+        ResolvConf(path=SYSTEM_RESOLV_CONF, nameservers=[]),
+    ]:
+        key = (type(item), os.path.realpath(getattr(item, "path", "")))
+        if key not in seen:
+            seen.add(key)
+            targets.append(item)
+    return targets

@@ -87,6 +87,7 @@ class GlobalConfig(BaseModel):
     control_socket_group: str | None = None
     marker_file: str | None = None
     resolv_conf: str | None = None
+    system_dns: bool = False
 
 
 class FileConfig(BaseModel):

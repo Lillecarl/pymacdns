@@ -22,6 +22,7 @@ let
           interval = cfg.interval;
           route_filter = cfg.routeFilter;
           control_socket = cfg.controlSocket;
+          system_dns = cfg.systemDns;
         }
         // lib.optionalAttrs (cfg.controlSocketGroup != null) {
           control_socket_group = cfg.controlSocketGroup;
@@ -110,6 +111,17 @@ in
         null manages nothing. macOS regenerates /etc/resolv.conf on
         network changes, which silently drops the block until restart --
         the failure direction is plain DHCP DNS, not an outage.
+      '';
+    };
+
+    systemDns = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Make our listeners the first resolver of macOS itself, for every
+        name except the mDNS domains. The daemon publishes a temporary
+        SCDynamicStore entry; configd removes it when the daemon exits,
+        SIGKILL included. Needs every listen entry on one port.
       '';
     };
 

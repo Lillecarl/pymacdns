@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import os
+import socket
+import subprocess
 import sys
+from typing import Final
 
 import anyio
 import httpx
@@ -55,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="probe effective upstreams across names and types"
     )
     sub.add_parser("latency", help="show in-memory upstream latency buckets")
+    sub.add_parser(
+        "nuke",
+        help="remove every DNS setting pymacdns installs and flush caches (root)",
+    )
     cache_parser = sub.add_parser("cache", help="inspect the daemon cache")
     cache_sub = cache_parser.add_subparsers(dest="cache_op", required=True)
     cache_sub.add_parser("list", help="list cached entries")
@@ -199,8 +207,7 @@ async def status_main(args: argparse.Namespace) -> int:
     return 0
 
 
-def serve_main(args: argparse.Namespace) -> int:
-    settings = load_settings(args)
+def installers_for(settings: DaemonSettings) -> list[installer_mod.Installer]:
     installers: list[installer_mod.Installer] = []
     if settings.server.marker_file is not None:
         installers.append(
@@ -213,6 +220,66 @@ def serve_main(args: argparse.Namespace) -> int:
                 nameservers=[host for host, _ in settings.server.listen],
             )
         )
+    if settings.server.system_dns:
+        installers.append(
+            installer_mod.SystemDns(listen=list(settings.server.listen))
+        )
+    return installers
+
+
+def nuke_main(args: argparse.Namespace) -> int:
+    """Remove everything any pymacdns run may have installed."""
+    if os.geteuid() != 0:
+        print("pymacdns: nuke needs root", file=sys.stderr)
+        return 1
+    # A broken config must not stop the cleanup it is meant to recover from.
+    try:
+        settings = load_settings(args)
+    except SystemExit:
+        settings = DaemonSettings()
+    targets = installer_mod.nuke_targets(installers_for(settings))
+    failed = False
+    for target in targets:
+        try:
+            target.cleanup()
+        except Exception as exc:  # noqa: BLE001 - report it, clean the rest
+            print(f"pymacdns: cleanup failed: {target}: {exc}", file=sys.stderr)
+            failed = True
+        else:
+            print(f"cleaned {target}")
+    for command in FLUSH_COMMANDS:
+        result = subprocess.run(command, check=False)
+        if result.returncode != 0:
+            print(f"pymacdns: {' '.join(command)} exited {result.returncode}",
+                  file=sys.stderr)
+            failed = True
+    if daemon_listening(settings.server.control_socket):
+        print(
+            "pymacdns: the daemon still runs and installs again when it "
+            "restarts; stop it through launchd",
+            file=sys.stderr,
+        )
+    return 1 if failed else 0
+
+
+FLUSH_COMMANDS: Final = (
+    ("/usr/bin/dscacheutil", "-flushcache"),
+    ("/usr/bin/killall", "-HUP", "mDNSResponder"),
+)
+
+
+def daemon_listening(path: str) -> bool:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        try:
+            sock.connect(path)
+        except OSError:
+            return False
+    return True
+
+
+def serve_main(args: argparse.Namespace) -> int:
+    settings = load_settings(args)
+    installers = installers_for(settings)
 
     async def child_main() -> None:
         await server_mod.run(settings, config_path=args.config)
@@ -247,6 +314,8 @@ def main() -> None:
         except KeyboardInterrupt:
             return
         sys.exit(code)
+    if args.command == "nuke":
+        sys.exit(nuke_main(args))
     # Forks here, before any thread or event loop exists.
     try:
         code = serve_main(args)

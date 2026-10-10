@@ -264,7 +264,7 @@ def nuke_main(args: argparse.Namespace) -> int:
     if released:
         print(
             "pymacdns: the daemon still answers on its listen addresses; "
-            "`pymacdns restore`, a restart or a rebuild installs again",
+            "`pymacdns restore` or a daemon restart installs again",
             file=sys.stderr,
         )
     return 1 if failed else 0

@@ -166,6 +166,7 @@ async def refresh_loop(
 async def run(
     settings: DaemonSettings,
     config_path: str = DEFAULT_CONFIG_PATH,
+    release: control_mod.Release | None = None,
 ) -> None:
     state = DnsState(route_filter=settings.server.route_filter)
     udp_socks: list[anyio.abc.UDPSocket] = []
@@ -221,6 +222,7 @@ async def run(
                 state.cache,
                 settings.server.control_socket_group,
                 state.latency,
+                release,
             )
 
 
@@ -229,9 +231,10 @@ async def serve_control_guarded(
     cache: cache_mod.DnsCache,
     group: str | None,
     stats: latency_mod.LatencyStats | None,
+    release: control_mod.Release | None,
 ) -> None:
     try:
-        await control_mod.serve_control(path, cache, group, stats)
+        await control_mod.serve_control(path, cache, group, stats, release)
     except OSError as exc:
         print(f"pymacdns: control socket {path}: {exc}", file=sys.stderr)
 

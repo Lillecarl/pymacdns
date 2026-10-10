@@ -17,7 +17,7 @@ from pymacdns import server as server_mod
 from pymacdns import status as status_mod
 from pymacdns import store as store_mod
 from pymacdns.config import DEFAULT_CONFIG_PATH, DaemonSettings, parse_listen
-from pymacdns.control import control_request
+from pymacdns.control import Release, control_request
 from pymacdns.store import dump_toml
 from pymacdns.supervise import run_supervised
 
@@ -237,6 +237,10 @@ def nuke_main(args: argparse.Namespace) -> int:
         settings = load_settings(args)
     except SystemExit:
         settings = DaemonSettings()
+    # First, so a running daemon stops restoring what we remove below.
+    released = release_daemon(settings.server.control_socket)
+    if released:
+        print("daemon released its settings")
     targets = installer_mod.nuke_targets(installers_for(settings))
     failed = False
     for target in targets:
@@ -253,29 +257,34 @@ def nuke_main(args: argparse.Namespace) -> int:
             print(f"pymacdns: {' '.join(command)} exited {result.returncode}",
                   file=sys.stderr)
             failed = True
-    if daemon_listening(settings.server.control_socket):
+    if released:
         print(
-            "pymacdns: the daemon still runs and installs again when it "
-            "restarts; stop it through launchd",
+            "pymacdns: the daemon still answers on its listen addresses and "
+            "installs again when it restarts; stop it through launchd",
             file=sys.stderr,
         )
     return 1 if failed else 0
 
 
+RELEASE_TIMEOUT: Final = 5.0
 FLUSH_COMMANDS: Final = (
     ("/usr/bin/dscacheutil", "-flushcache"),
     ("/usr/bin/killall", "-HUP", "mDNSResponder"),
 )
 
 
-def daemon_listening(path: str) -> bool:
-    """Whether a daemon answers a pid request on the control socket."""
+def release_daemon(path: str) -> bool:
+    """Ask a running daemon to drop its settings and stop restoring them.
+
+    Synchronous with a timeout: a wedged daemon must not hang the
+    cleanup that is meant to recover from it.
+    """
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(2)
+        sock.settimeout(RELEASE_TIMEOUT)
         try:
             sock.connect(path)
-            sock.sendall(b'{"op": "pid"}\n')
-            return b'"pid"' in sock.recv(4096)
+            sock.sendall(b'{"op": "release"}\n')
+            return b'"released"' in sock.recv(4096)
         except OSError:
             return False
 
@@ -284,8 +293,8 @@ def serve_main(args: argparse.Namespace) -> int:
     settings = load_settings(args)
     installers = installers_for(settings)
 
-    async def child_main() -> None:
-        await server_mod.run(settings, config_path=args.config)
+    async def child_main(release: Release) -> None:
+        await server_mod.run(settings, config_path=args.config, release=release)
 
     try:
         return run_supervised(installers, child_main)

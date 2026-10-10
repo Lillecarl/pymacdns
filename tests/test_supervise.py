@@ -212,3 +212,33 @@ async def test_resolv_conf_managed_and_restored(tmp_path, sock_dir):
             assert dummy.read_bytes() == before
     finally:
         await reap(proc)
+
+
+@pytest.mark.anyio
+async def test_release_drops_settings_and_keeps_serving(tmp_path, sock_dir):
+    """release removes what the daemon installed, and it stays removed."""
+    from pymacdns.installer import BEGIN_MARK
+    from pymacdns.supervise import REAPPLY_INTERVAL
+
+    dummy = tmp_path / "resolv.conf"
+    dummy.write_text("nameserver 9.9.9.9\n")
+    before = dummy.read_bytes()
+    marker = tmp_path / "installed"
+    proc, control_sock = await spawn(marker, sock_dir, free_port(), resolv=dummy)
+    try:
+        with anyio.fail_after(60):
+            await wait_for(Path(control_sock))
+            pid = (await control_request(control_sock, {"op": "pid"}))["pid"]
+            reply = await control_request(control_sock, {"op": "release"})
+            assert reply == {"released": True}
+            assert not marker.exists()
+            assert dummy.read_bytes() == before
+            # Past a reapply tick: nothing may come back.
+            await anyio.sleep(REAPPLY_INTERVAL * 2)
+            assert BEGIN_MARK not in dummy.read_text()
+            assert not marker.exists()
+            assert proc.returncode is None
+            reply = await control_request(control_sock, {"op": "pid"})
+            assert reply == {"pid": pid}
+    finally:
+        await reap(proc)

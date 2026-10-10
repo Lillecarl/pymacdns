@@ -113,7 +113,11 @@ async def test_snapshot_once_reads_live_system(tmp_path):
         '[[resolver]]\ndomain = "example.com"\n'
         'nameservers = ["9.9.9.9"]\npriority = -100\n'
     )
-    snap = store_mod.snapshot_once(2.0, set(), str(conf))
+    try:
+        snap = store_mod.snapshot_once(2.0, set(), str(conf))
+    except RuntimeError as exc:
+        # The nix build sandbox denies configd; this test needs the live one.
+        pytest.skip(str(exc))
     assert isinstance(snap, store_mod.Snapshot)
     pinned = snap.domains.get("example.com")
     assert pinned is not None

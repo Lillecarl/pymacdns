@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 from collections.abc import AsyncIterator
@@ -185,6 +186,8 @@ def _fetch_store_dicts() -> tuple[list[str], list[ServiceDns]]:
     )
 
     store = SCDynamicStoreCreate(None, "pymacdns", None, None)
+    if store is None:
+        raise RuntimeError("cannot reach configd")
     global_info = dict(SCDynamicStoreCopyValue(store, GLOBAL_DNS_KEY) or {})
     services = []
     for key in SCDynamicStoreCopyKeyList(store, SERVICE_DNS_PATTERN) or []:
@@ -243,25 +246,42 @@ def _run_watcher(
 
     from pymacdns.config import load_config
 
+    # configd can be unreachable (the nix build sandbox denies it). Every
+    # call below then gets None, and CFRunLoopAddSource(None) segfaults,
+    # so poll on a plain timer instead.
     store = SCDynamicStoreCreate(None, "pymacdns-watch", lambda *args: None, None)
-    SCDynamicStoreSetNotificationKeys(store, [GLOBAL_DNS_KEY], SERVICE_NOTIFY_PATTERNS)
-    source = SCDynamicStoreCreateRunLoopSource(None, store, 0)
-    loop = CFRunLoopGetCurrent()
-    CFRunLoopAddSource(loop, source, kCFRunLoopDefaultMode)
+    notified = store is not None
+    if notified:
+        SCDynamicStoreSetNotificationKeys(
+            store, [GLOBAL_DNS_KEY], SERVICE_NOTIFY_PATTERNS
+        )
+        source = SCDynamicStoreCreateRunLoopSource(None, store, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode)
 
     last: Snapshot | None = None
     toml_mtime: int | None = None
     toml_rules: list[Candidate] = []
+    # A failed read keeps the last good value of that source alone, so the
+    # other sources still apply and one failure never empties a snapshot.
+    system: list[Candidate] = []
+    files: list[Candidate] = []
     target = Path(config_path)
+    # Read before the first wait: until the first snapshot the server has
+    # no upstream and answers SERVFAIL to every query.
+    first = True
     while not stop.is_set():
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, RUNLOOP_TICK, False)
-        if stop.is_set():
-            break
-        try:
+        if not first:
+            if notified:
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, RUNLOOP_TICK, False)
+            else:
+                stop.wait(RUNLOOP_TICK)
+            if stop.is_set():
+                break
+        first = False
+        with contextlib.suppress(Exception):  # next tick retries
             system = _read_system(self_hosts)
+        with contextlib.suppress(OSError):
             files = _read_files(self_hosts)
-        except Exception:  # noqa: BLE001 - keep watching, next tick retries
-            continue
         try:
             mtime = target.stat().st_mtime_ns if target.is_file() else None
         except OSError:
